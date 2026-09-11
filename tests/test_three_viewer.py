@@ -275,7 +275,7 @@ def test_viewer_template_shows_xyz_hover_for_edit_handles() -> None:
     assert "X / East" in html
     assert "Y / North" in html
     assert 'label: "Z"' in html
-    assert "Z / TVD" not in html
+    assert 'for="edit-coordinate-z">Z / TVD</label>' in html
     assert 'color: "#16A34A"' in html
     assert 'color: "#2563EB"' in html
     assert 'color: "#DC2626"' in html
@@ -367,7 +367,8 @@ def test_viewer_template_shows_xyz_hover_for_edit_handles() -> None:
     assert "function setEditMoveScope(scope)" in html
     assert 'let editMoveScope = "point";' in html
     assert 'title="Изменить точки скважины"' in html
-    assert 'data-scope="pair" type="button">Все</button>' in html
+    assert 'data-scope="pair" type="button">Пара t1–t3</button>' in html
+    assert 'data-scope="well" type="button">Все точки</button>' in html
     assert 'id="edit-operation-selector"' in html
     assert 'data-operation="move"' in html
     assert 'data-operation="rotate"' in html
@@ -713,7 +714,7 @@ def test_viewer_template_uses_single_scene_handle_for_pad_edits() -> None:
         "function worldUnitsPerPixelAt"
     )[0]
 
-    assert 'id="edit-pad-summary"' not in html
+    assert 'id="edit-pad-summary"' in html
     assert "if (Number.isInteger(selectedEditPadIndex)) {\n            return [];\n          }" in html
     assert "selectedEditWellIndices = new Set();" in html
     assert "selectedEditWellIndex = null;" in html

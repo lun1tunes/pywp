@@ -1,3 +1,157 @@
+                upper_dls_deg_per_30m=resolved_build2_upper,
+            )
+        )
+    build1_grid = _dedupe_scalar_values(
+        build1_values,
+        lower=build_dls_lower_deg_per_30m,
+        upper=build_dls_upper_deg_per_30m,
+    )
+    build2_grid = _dedupe_scalar_values(
+        build2_values,
+        lower=build_dls_lower_deg_per_30m,
+        upper=resolved_build2_upper,
+    )
+
+    def objective_base(candidate: ProfileParameters) -> float:
+        if (
+            _fixed_kop_vertical_target(config) is None
+            and str(config.optimization_mode) == OPTIMIZATION_MINIMIZE_KOP
+        ):
+            return float(candidate.kop_vertical_m)
+        return float(candidate.md_total_m)
+
+    candidates: list[ProfileParameters] = []
+    best_miss = np.inf
+    best_lateral_m = np.inf
+    best_vertical_m = np.inf
+    best_build_dls = float(max(build_dls_upper_deg_per_30m, resolved_build2_upper))
+    seen: set[tuple[float, float, float, float, float]] = set()
+
+    for build1_dls in build1_grid:
+        for build2_dls in build2_grid:
+            if abs(float(build1_dls) - float(build2_dls)) <= SMALL:
+                continue
+            inc_bounds = _zero_azimuth_split_inc_hold_bounds(
+                geometry=geometry,
+                config=config,
+                dls_build1_deg_per_30m=float(build1_dls),
+                dls_build2_deg_per_30m=float(build2_dls),
+            )
+            if inc_bounds is None:
+                continue
+            lower_inc_deg, upper_inc_deg = inc_bounds
+            theta_seeds = list(
+                _dedupe_scalar_values(
+                    [
+                        float(lower_inc_deg),
+                        float(upper_inc_deg),
+                        0.5 * float(lower_inc_deg + upper_inc_deg),
+                        *_axis_samples(
+                            float(lower_inc_deg),
+                            float(upper_inc_deg),
+                            max(3, 1 + 2 * int(search_settings.seed_lattice_points)),
+                        ).tolist(),
+                    ],
+                    lower=float(lower_inc_deg),
+                    upper=float(upper_inc_deg),
+                )
+            )
+            eval_cache: dict[
+                float, tuple[ProfileParameters | None, CandidateOptimizationEvaluation]
+            ] = {}
+
+            def evaluate_theta(
+                inc_hold_deg: float,
+            ) -> tuple[ProfileParameters | None, CandidateOptimizationEvaluation]:
+                key = round(float(inc_hold_deg), 8)
+                cached = eval_cache.get(key)
+                if cached is not None:
+                    return cached
+                candidate = _build_zero_azimuth_split_profile(
+                    geometry=geometry,
+                    config=config,
+                    post_entry=post_entry,
+                    dls_build1_deg_per_30m=float(build1_dls),
+                    dls_build2_deg_per_30m=float(build2_dls),
+                    inc_hold_deg=float(inc_hold_deg),
+                )
+                evaluation = _evaluate_profile_candidate(
+                    candidate=candidate,
+                    target_point=target_point,
+                    config=config,
+                )
+                eval_cache[key] = (candidate, evaluation)
+                return candidate, evaluation
+
+            def score_theta(inc_hold_deg: float) -> float:
+                candidate, evaluation = evaluate_theta(float(inc_hold_deg))
+                if candidate is None or evaluation.candidate is None:
+                    return 1e12
+                penalty = sum(
+                    max(-float(margin), 0.0) ** 2
+                    for margin in (
+                        evaluation.t1_margin_m,
+                        evaluation.build1_margin_m,
+                        evaluation.build2_margin_m,
+                        evaluation.max_inc_margin_deg,
+                        evaluation.horizontal_dls_margin_deg_per_30m,
+                    )
+                )
+                return float(objective_base(candidate) + 1e6 * penalty)
+
+            ranked_seed_values = sorted(
+                ((score_theta(seed), float(seed)) for seed in theta_seeds),
+                key=lambda item: (float(item[0]), float(item[1])),
+            )
+            probe_values = [seed for _score, seed in ranked_seed_values[:3]]
+            if abs(float(upper_inc_deg) - float(lower_inc_deg)) > SMALL:
+                maxiter = max(
+                    18,
+                    min(48, int(round(0.12 * float(search_settings.local_max_nfev)))),
+                )
+                for _score, seed in ranked_seed_values[:3]:
+                    result = minimize(
+                        fun=lambda values: score_theta(float(values[0])),
+                        x0=np.array([float(seed)], dtype=float),
+                        method="SLSQP",
+                        bounds=[(float(lower_inc_deg), float(upper_inc_deg))],
+                        options={
+                            "maxiter": int(maxiter),
+                            "ftol": 1e-8,
+                            "disp": False,
+                        },
+                    )
+                    if np.all(np.isfinite(result.x)):
+                        probe_values.append(float(result.x[0]))
+
+            for probe_value in _dedupe_scalar_values(
+                probe_values,
+                lower=float(lower_inc_deg),
+                upper=float(upper_inc_deg),
+            ):
+                candidate, evaluation = evaluate_theta(float(probe_value))
+                if candidate is None:
+                    continue
+                endpoint = np.array(
+                    _estimate_t1_endpoint_for_profile(candidate),
+                    dtype=float,
+                )
+                _, _, _, lateral_m, vertical_m, _ = _target_miss_components(
+                    endpoint,
+                    target_point,
+                )
+                miss = _normalized_target_miss(
+                    endpoint=endpoint,
+                    target_point=target_point,
+                    config=config,
+                )
+                if miss < best_miss - SMALL or abs(miss - best_miss) <= SMALL:
+                    best_miss = miss
+                    best_lateral_m = float(lateral_m)
+                    best_vertical_m = float(vertical_m)
+                    best_build_dls = float(
+                        max(
+                            candidate.dls_build1_deg_per_30m,
                             candidate.dls_build2_deg_per_30m,
                         )
                     )
@@ -26878,195 +27032,3 @@ def anticollision_three_payload(
         if not overlap_rings:
             continue
         stacked = np.vstack(overlap_rings)
-        _append_arrays(x_arrays, y_arrays, z_arrays, stacked)
-        if (not focus_set) or bool({str(corridor.well_a), str(corridor.well_b)} & focus_set):
-            _append_arrays(x_focus_arrays, y_focus_arrays, z_focus_arrays, stacked)
-
-    segment_legend_added = False
-    for segment in analysis.well_segments:
-        well = well_lookup.get(str(segment.well_name))
-        if well is None:
-            continue
-        interval_points = _trajectory_interval_points(
-            well.stations,
-            md_start_m=float(segment.md_start_m),
-            md_end_m=float(segment.md_end_m),
-        )
-        if interval_points is None:
-            continue
-        x_segment = interval_points["X_m"].to_numpy(dtype=float)
-        y_segment = interval_points["Y_m"].to_numpy(dtype=float)
-        z_segment = interval_points["Z_m"].to_numpy(dtype=float)
-        md_segment = interval_points["MD_m"].to_numpy(dtype=float)
-        dls_segment = _interp_optional_column(
-            well.stations,
-            md_values=md_segment,
-            column="DLS_deg_per_30m",
-            default=0.0,
-        )
-        inc_segment = _interp_optional_column(
-            well.stations,
-            md_values=md_segment,
-            column="INC_deg",
-            default=0.0,
-        )
-        segment_points = _points_from_xyz_arrays(x_segment, y_segment, z_segment)
-        _append_line_segments(
-            payload,
-            segments=[segment_points],
-            name="Конфликтный участок ствола",
-            color="#C62828",
-            opacity=1.0,
-            dash="solid",
-            role="conflict_segment",
-        )
-        payload["points"].append(
-            {
-                "name": "Конфликтный участок ствола",
-                "points": segment_points,
-                "color": "#C62828",
-                "opacity": 0.001,
-                "size": 8.5,
-                "symbol": "circle",
-                "hover": [
-                    {
-                        "name": str(segment.well_name),
-                        "md": float(md_value),
-                        "dls": float(dls_value),
-                        "inc": float(inc_value),
-                        "segment": "Конфликтный участок",
-                    }
-                    for md_value, dls_value, inc_value in zip(
-                        md_segment,
-                        dls_segment,
-                        inc_segment,
-                        strict=False,
-                    )
-                ],
-                "hover_only": True,
-                "role": "conflict_hover",
-            }
-        )
-        if not segment_legend_added:
-            _append_unique_legend_item(
-                payload,
-                label="Конфликтный участок ствола",
-                color="#C62828",
-                opacity=1.0,
-            )
-            segment_legend_added = True
-        _append_arrays(x_arrays, y_arrays, z_arrays, np.column_stack([x_segment, y_segment, z_segment]))
-        if (not focus_set) or str(segment.well_name) in focus_set:
-            _append_arrays(
-                x_focus_arrays,
-                y_focus_arrays,
-                z_focus_arrays,
-                np.column_stack([x_segment, y_segment, z_segment]),
-            )
-
-    payload["bounds"] = _bounds_from_arrays(
-        x_arrays=x_focus_arrays or x_arrays,
-        y_arrays=y_focus_arrays or y_arrays,
-        z_arrays=z_focus_arrays or z_arrays,
-    )
-    overlap_volumes = ptc_three_overrides.overlap_volume_payloads(analysis)
-    optimized = ptc_three_payload.optimize_three_payload(payload)
-    if overlap_volumes:
-        optimized["meshes"] = [*list(optimized.get("meshes") or []), *overlap_volumes]
-        _append_unique_legend_item(
-            optimized,
-            label="Зоны пересечений",
-            color="#C62828",
-            opacity=0.34,
-        )
-    return optimized
-
-
-def _base_payload(*, title: str) -> dict[str, object]:
-    return {
-        "background": THREE_BACKGROUND,
-        "title": title,
-        "bounds": {"min": [0.0, 0.0, 0.0], "max": [1000.0, 1000.0, 1000.0]},
-        "camera": DEFAULT_THREE_CAMERA,
-        "lines": [],
-        "meshes": [],
-        "points": [],
-        "labels": [],
-        "optional_reference_labels": [],
-        "legend": [],
-    }
-
-
-def _append_station_line(
-    payload: dict[str, object],
-    *,
-    stations: pd.DataFrame,
-    name: str,
-    color: str,
-    width_role: str,
-    x_arrays: list[np.ndarray],
-    y_arrays: list[np.ndarray],
-    z_arrays: list[np.ndarray],
-    focus_arrays: tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]] | None = None,
-    dash: str = "solid",
-    opacity: float = 1.0,
-    hover_name: str | None = None,
-    hover_role: str = "trajectory_hover",
-    show_hover: bool = True,
-) -> None:
-    if stations.empty or not {"X_m", "Y_m", "Z_m"}.issubset(stations.columns):
-        return
-    x_values = stations["X_m"].to_numpy(dtype=float)
-    y_values = stations["Y_m"].to_numpy(dtype=float)
-    z_values = stations["Z_m"].to_numpy(dtype=float)
-    segments = _split_finite_segments(x_values=x_values, y_values=y_values, z_values=z_values)
-    if segments:
-        _append_line_segments(
-            payload,
-            segments=segments,
-            name=name,
-            color=color,
-            opacity=opacity,
-            dash=dash,
-            role=width_role,
-        )
-    _append_arrays_from_xyz(x_arrays, y_arrays, z_arrays, x_values, y_values, z_values)
-    if focus_arrays is not None:
-        _append_arrays_from_xyz(*focus_arrays, x_values, y_values, z_values)
-    if show_hover:
-        _append_station_hover_points(
-            payload,
-            stations=stations,
-            name=hover_name or name,
-            color=color,
-            hover_role=hover_role,
-        )
-
-
-def _append_line_segments(
-    payload: dict[str, object],
-    *,
-    segments: list[list[list[float]]],
-    name: str,
-    color: str,
-    opacity: float,
-    dash: str,
-    role: str,
-) -> None:
-    if not segments:
-        return
-    payload["lines"].append(
-        {
-            "name": str(name),
-            "segments": segments,
-            "color": str(color),
-            "opacity": float(opacity),
-            "dash": str(dash or "solid"),
-            "role": str(role or "line"),
-        }
-    )
-
-
-def _append_mesh(
-    payload: dict[str, object],
-    *,

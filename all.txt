@@ -1807,11 +1807,10 @@ if __name__ == "__main__":
     run_page()
 
 ===END_FILE===
-===BEGIN_FILE===	pages/04_crs_calculator.py	14798
+===BEGIN_FILE===	pages/04_crs_calculator.py	13402
 from __future__ import annotations
 
 import logging
-import re
 
 logging.getLogger("streamlit").setLevel(logging.ERROR)
 logging.getLogger("streamlit.runtime.scriptrunner_utils.script_run_context").setLevel(
@@ -1819,34 +1818,30 @@ logging.getLogger("streamlit.runtime.scriptrunner_utils.script_run_context").set
 )
 logging.getLogger("streamlit.runtime.caching.cache_data_api").setLevel(logging.ERROR)
 
-import pandas as pd
-import streamlit as st
-from streamlit.runtime.scriptrunner_utils.script_run_context import get_script_run_ctx
-
-from pywp.coordinate_integration import (
-    CRS_LABEL_BY_VALUE,
-    CSV_CRS_OPTIONS,
-    DEFAULT_CRS,
-    INPUT_CRS_LABEL_BY_VALUE,
-    INPUT_CRS_OPTIONS,
-    can_transform_crs,
-    transform_xy_to_crs,
+import pandas as pd  # noqa: E402
+import streamlit as st  # noqa: E402
+from streamlit.runtime.scriptrunner_utils.script_run_context import (  # noqa: E402
+    get_script_run_ctx,
 )
-from pywp.coordinate_systems import CoordinateSystem
-from pywp.ui_theme import apply_page_style
+
+from pywp.coordinate_integration import (  # noqa: E402
+    CALCULATOR_INPUT_CRS_LABEL_BY_VALUE,
+    CALCULATOR_INPUT_CRS_OPTIONS,
+    CALCULATOR_OUTPUT_CRS_LABEL_BY_VALUE,
+    CALCULATOR_OUTPUT_CRS_OPTIONS,
+    CRS_LABEL_ALIASES,
+    CoordinateSystemError,
+    DEFAULT_CRS,
+    can_transform_crs,
+    strict_transform_xy_to_crs,
+)
+from pywp.coordinate_systems import CoordinateSystem  # noqa: E402
+from pywp.ui_theme import apply_page_style  # noqa: E402
 
 _DEFAULT_OUTPUT_CRS = CoordinateSystem.WGS84_UTM_ZONE_43N
 _DEFAULT_X = 600_010.6
 _DEFAULT_Y = 7_407_421.0
-_DEFAULT_WGS84_LON = 72.23553333333334
-_DEFAULT_WGS84_LAT = 71.17081666666667
-_DEFAULT_WGS84_DMS = "N 71 10 14.94; E 72 14 7.92"
 _BATCH_EDITOR_COLUMNS = ("X", "Y")
-_WGS84_INPUT_LABEL = "WGS84 (градусы)"
-_CALCULATOR_INPUT_CRS_OPTIONS = [
-    *INPUT_CRS_OPTIONS,
-    (_WGS84_INPUT_LABEL, CoordinateSystem.WGS84),
-]
 _SWAP_CRS_BUTTON_LABEL = "⇄"
 
 
@@ -1870,14 +1865,14 @@ def _index_for_crs(
 
 
 def _default_input_label() -> str:
-    return _labels(_CALCULATOR_INPUT_CRS_OPTIONS)[
-        _index_for_crs(DEFAULT_CRS, _CALCULATOR_INPUT_CRS_OPTIONS)
+    return _labels(CALCULATOR_INPUT_CRS_OPTIONS)[
+        _index_for_crs(DEFAULT_CRS, CALCULATOR_INPUT_CRS_OPTIONS)
     ]
 
 
 def _default_output_label() -> str:
-    return _labels(CSV_CRS_OPTIONS)[
-        _index_for_crs(_DEFAULT_OUTPUT_CRS, CSV_CRS_OPTIONS)
+    return _labels(CALCULATOR_OUTPUT_CRS_OPTIONS)[
+        _index_for_crs(_DEFAULT_OUTPUT_CRS, CALCULATOR_OUTPUT_CRS_OPTIONS)
     ]
 
 
@@ -1885,8 +1880,8 @@ def _swap_crs_labels_supported(
     input_label: str,
     output_label: str,
 ) -> bool:
-    input_labels = set(_labels(_CALCULATOR_INPUT_CRS_OPTIONS))
-    output_labels = set(_labels(CSV_CRS_OPTIONS))
+    input_labels = set(_labels(CALCULATOR_INPUT_CRS_OPTIONS))
+    output_labels = set(_labels(CALCULATOR_OUTPUT_CRS_OPTIONS))
     return str(input_label) in output_labels and str(output_label) in input_labels
 
 
@@ -1910,58 +1905,12 @@ def _format_value(value: float, crs: CoordinateSystem) -> str:
 
 def _crs_display_name(crs: CoordinateSystem, *, output: bool) -> str:
     if output:
-        return CRS_LABEL_BY_VALUE.get(crs, crs.name)
-    return INPUT_CRS_LABEL_BY_VALUE.get(crs, crs.name)
+        return CALCULATOR_OUTPUT_CRS_LABEL_BY_VALUE.get(crs, crs.name)
+    return CALCULATOR_INPUT_CRS_LABEL_BY_VALUE.get(crs, crs.name)
 
 
 def _default_batch_editor_frame() -> pd.DataFrame:
     return pd.DataFrame([{column: None for column in _BATCH_EDITOR_COLUMNS}])
-
-
-def _parse_dms_component(text: str) -> tuple[str, float]:
-    tokens = re.findall(r"[NSEW]|[-+]?\d+(?:[.,]\d+)?", str(text).upper())
-    if len(tokens) != 4:
-        raise ValueError("ожидается формат вида `N 71 10 14.94`.")
-    direction = str(tokens[0])
-    if direction not in {"N", "S", "E", "W"}:
-        raise ValueError("неверное направление: используйте N/S/E/W.")
-    degrees = float(str(tokens[1]).replace(",", "."))
-    minutes = float(str(tokens[2]).replace(",", "."))
-    seconds = float(str(tokens[3]).replace(",", "."))
-    if degrees < 0.0:
-        raise ValueError("градусы должны быть неотрицательными.")
-    if minutes < 0.0 or minutes >= 60.0:
-        raise ValueError("минуты должны быть в диапазоне [0, 60).")
-    if seconds < 0.0 or seconds >= 60.0:
-        raise ValueError("секунды должны быть в диапазоне [0, 60).")
-    limit = 90.0 if direction in {"N", "S"} else 180.0
-    if degrees > limit:
-        raise ValueError(f"градусы для {direction} должны быть <= {limit:.0f}.")
-    if degrees == limit and (minutes > 0.0 or seconds > 0.0):
-        raise ValueError(
-            f"для {direction} при {limit:.0f}° минуты и секунды должны быть равны 0."
-        )
-    decimal = degrees + minutes / 60.0 + seconds / 3600.0
-    if direction in {"S", "W"}:
-        decimal *= -1.0
-    return direction, decimal
-
-
-def _parse_wgs84_dms_input(text: str) -> tuple[float, float]:
-    """Parse WGS84 DMS text and return calculator X/Y order: (longitude, latitude)."""
-    parts = [part.strip() for part in re.split(r"[;\n]+", str(text)) if part.strip()]
-    if len(parts) != 2:
-        raise ValueError(
-            "ожидаются две части через `;`: сначала широта, затем долгота."
-        )
-    parsed = dict(_parse_dms_component(part) for part in parts)
-    lat = parsed.get("N", parsed.get("S"))
-    lon = parsed.get("E", parsed.get("W"))
-    if lat is None or lon is None:
-        raise ValueError("нужны широта `N/S` и долгота `E/W`.")
-    x_lon_deg = float(lon)
-    y_lat_deg = float(lat)
-    return x_lon_deg, y_lat_deg
 
 
 def _normalize_batch_editor_frame(
@@ -2017,7 +1966,7 @@ def _batch_result_frame(
 
     rows: list[dict[str, str]] = []
     for x_in, y_in in points[["X", "Y"]].itertuples(index=False, name=None):
-        x_out, y_out = transform_xy_to_crs(
+        x_out, y_out = strict_transform_xy_to_crs(
             float(x_in),
             float(y_in),
             input_crs,
@@ -2046,13 +1995,17 @@ def _result_frame(
     return pd.DataFrame(
         [
             {
-                "CRS": INPUT_CRS_LABEL_BY_VALUE.get(input_crs, input_crs.name),
+                "CRS": CALCULATOR_INPUT_CRS_LABEL_BY_VALUE.get(
+                    input_crs, input_crs.name
+                ),
                 "X": _format_value(x_in, input_crs),
                 "Y": _format_value(y_in, input_crs),
                 "Роль": "Вход",
             },
             {
-                "CRS": CRS_LABEL_BY_VALUE.get(output_crs, output_crs.name),
+                "CRS": CALCULATOR_OUTPUT_CRS_LABEL_BY_VALUE.get(
+                    output_crs, output_crs.name
+                ),
                 "X": _format_value(x_out, output_crs),
                 "Y": _format_value(y_out, output_crs),
                 "Роль": "Выход",
@@ -2065,14 +2018,31 @@ def run_page() -> None:
     st.set_page_config(page_title="Калькулятор СК", layout="wide")
     apply_page_style(max_width_px=1100)
 
-    input_labels = _labels(_CALCULATOR_INPUT_CRS_OPTIONS)
-    output_labels = _labels(CSV_CRS_OPTIONS)
+    input_labels = _labels(CALCULATOR_INPUT_CRS_OPTIONS)
+    output_labels = _labels(CALCULATOR_OUTPUT_CRS_OPTIONS)
+    for key in ("crs_calc_input_crs", "crs_calc_output_crs"):
+        previous_label = st.session_state.get(key)
+        if previous_label in CRS_LABEL_ALIASES:
+            st.session_state[key] = CRS_LABEL_ALIASES[previous_label]
     current_input_label = str(
         st.session_state.get("crs_calc_input_crs", _default_input_label())
     )
     current_output_label = str(
         st.session_state.get("crs_calc_output_crs", _default_output_label())
     )
+    if current_input_label not in input_labels:
+        st.session_state.pop("crs_calc_input_crs", None)
+        st.session_state["crs_calc_x"] = None
+        st.session_state["crs_calc_y"] = None
+        st.session_state.pop("crs_calc_batch_points", None)
+        current_input_label = _default_input_label()
+        st.warning(
+            "Прежняя входная CRS больше недоступна. "
+            "Выберите прямоугольную CRS и заново введите координаты в метрах."
+        )
+    if current_output_label not in output_labels:
+        st.session_state.pop("crs_calc_output_crs", None)
+        current_output_label = _default_output_label()
     can_swap_crs_labels = _swap_crs_labels_supported(
         current_input_label,
         current_output_label,
@@ -2081,7 +2051,7 @@ def run_page() -> None:
     input_label = c1.selectbox(
         "Входная CRS",
         options=input_labels,
-        index=_index_for_crs(DEFAULT_CRS, _CALCULATOR_INPUT_CRS_OPTIONS),
+        index=_index_for_crs(DEFAULT_CRS, CALCULATOR_INPUT_CRS_OPTIONS),
         key="crs_calc_input_crs",
     )
     c_swap.button(
@@ -2094,117 +2064,100 @@ def run_page() -> None:
     output_label = c2.selectbox(
         "Выходная CRS",
         options=output_labels,
-        index=_index_for_crs(_DEFAULT_OUTPUT_CRS, CSV_CRS_OPTIONS),
+        index=_index_for_crs(_DEFAULT_OUTPUT_CRS, CALCULATOR_OUTPUT_CRS_OPTIONS),
         key="crs_calc_output_crs",
     )
 
     input_crs = _crs_by_label(
         input_label,
-        _CALCULATOR_INPUT_CRS_OPTIONS,
+        CALCULATOR_INPUT_CRS_OPTIONS,
         DEFAULT_CRS,
     )
-    output_crs = _crs_by_label(output_label, CSV_CRS_OPTIONS, _DEFAULT_OUTPUT_CRS)
+    output_crs = _crs_by_label(
+        output_label, CALCULATOR_OUTPUT_CRS_OPTIONS, _DEFAULT_OUTPUT_CRS
+    )
+    if input_crs.name.startswith("PULKOVO_1942_"):
+        st.caption(
+            "СК-42 Зона N — полный зональный отсчёт; ГК_NN_42 — сокращённый. "
+            "Для одной зоны полная восточная координата = сокращённая + N × 1 000 000 м."
+        )
+    if input_crs.name.startswith("GSK_2011_ZONE_"):
+        zone = int(input_crs.name.rsplit("_", 1)[1])
+        st.caption(
+            f"ГСК2011: шестиградусная зона {zone}, {input_crs.value}. "
+            f"Восточный отсчёт X включает номер зоны в миллионах; "
+            f"на центральном меридиане X = {zone * 1_000_000 + 500_000:,} м."
+        )
+    if output_crs.is_geographic():
+        st.caption("Географический выход: X = долгота (E), Y = широта (N), градусы.")
 
     can_transform = can_transform_crs(input_crs, output_crs)
     if input_crs != output_crs and not can_transform:
         st.warning(
             "Для выбранной пары CRS нет безопасного прямого пересчёта; "
-            "значения оставлены как есть."
+            "результат пересчёта недоступен."
         )
     single_tab, batch_tab = st.tabs(["Одна точка", "Таблица точек"])
 
     with single_tab:
-        x_in: float | None = None
-        y_in: float | None = None
-        if input_crs.is_geographic():
-            input_mode = st.radio(
-                "Формат ввода WGS84",
-                options=["DMS", "Decimal"],
-                horizontal=True,
-                key="crs_calc_wgs84_input_mode",
-            )
-            if str(input_mode) == "DMS":
-                dms_value = st.text_input(
-                    "WGS84 DMS",
-                    value=_DEFAULT_WGS84_DMS,
-                    key="crs_calc_wgs84_dms",
-                    placeholder="N 71 10 14.94; E 72 14 7.92",
-                )
-                try:
-                    lon_deg, lat_deg = _parse_wgs84_dms_input(dms_value)
-                except ValueError as exc:
-                    st.warning(f"Не удалось разобрать WGS84 DMS: {exc}")
-                else:
-                    x_in = lon_deg
-                    y_in = lat_deg
-                    st.caption(
-                        "Распознано как "
-                        f"широта {lat_deg:.8f}°, долгота {lon_deg:.8f}°."
-                    )
-            else:
-                x_col, y_col = st.columns(2, gap="small")
-                x_in = x_col.number_input(
-                    "Долгота (E)",
-                    value=float(_DEFAULT_WGS84_LON),
-                    step=0.000001,
-                    format="%.8f",
-                    key="crs_calc_x",
-                )
-                y_in = y_col.number_input(
-                    "Широта (N)",
-                    value=float(_DEFAULT_WGS84_LAT),
-                    step=0.000001,
-                    format="%.8f",
-                    key="crs_calc_y",
-                )
-        else:
-            x_col, y_col = st.columns(2, gap="small")
-            x_in = x_col.number_input(
-                "X",
-                value=float(_DEFAULT_X),
-                step=1.0,
-                format="%.3f",
-                key="crs_calc_x",
-            )
-            y_in = y_col.number_input(
-                "Y",
-                value=float(_DEFAULT_Y),
-                step=1.0,
-                format="%.3f",
-                key="crs_calc_y",
-            )
+        st.caption(
+            f"{_crs_display_name(input_crs, output=False)}: "
+            "X = восточная координата (E), Y = северная координата (N), метры."
+        )
+        x_col, y_col = st.columns(2, gap="small")
+        x_in = x_col.number_input(
+            "X (м)",
+            value=st.session_state.get("crs_calc_x", float(_DEFAULT_X)),
+            step=1.0,
+            format="%.3f",
+            key="crs_calc_x",
+        )
+        y_in = y_col.number_input(
+            "Y (м)",
+            value=st.session_state.get("crs_calc_y", float(_DEFAULT_Y)),
+            step=1.0,
+            format="%.3f",
+            key="crs_calc_y",
+        )
         if x_in is None or y_in is None:
-            st.info("Введите корректную точку WGS84, чтобы увидеть результат пересчёта.")
+            st.info(
+                "Введите корректную прямоугольную точку X/Y в метрах, "
+                "чтобы увидеть результат пересчёта."
+            )
         else:
-            x_out, y_out = transform_xy_to_crs(
-                float(x_in),
-                float(y_in),
-                input_crs,
-                output_crs,
-            )
-            st.dataframe(
-                _result_frame(
-                    x_in=float(x_in),
-                    y_in=float(y_in),
-                    x_out=float(x_out),
-                    y_out=float(y_out),
-                    input_crs=input_crs,
-                    output_crs=output_crs,
-                ),
-                hide_index=True,
-                width="stretch",
-            )
+            try:
+                x_out, y_out = strict_transform_xy_to_crs(
+                    float(x_in),
+                    float(y_in),
+                    input_crs,
+                    output_crs,
+                )
+            except CoordinateSystemError as exc:
+                st.error(f"Пересчёт не выполнен: {exc}")
+            else:
+                st.dataframe(
+                    _result_frame(
+                        x_in=float(x_in),
+                        y_in=float(y_in),
+                        x_out=float(x_out),
+                        y_out=float(y_out),
+                        input_crs=input_crs,
+                        output_crs=output_crs,
+                    ),
+                    hide_index=True,
+                    width="stretch",
+                )
 
-            out_x_col, out_y_col = st.columns(2, gap="small")
-            out_x_col.metric("X output", _format_value(x_out, output_crs))
-            out_y_col.metric("Y output", _format_value(y_out, output_crs))
+                out_x_col, out_y_col = st.columns(2, gap="small")
+                out_x_col.metric("X output", _format_value(x_out, output_crs))
+                out_y_col.metric("Y output", _format_value(y_out, output_crs))
 
     with batch_tab:
-        editor_format = "%.8f" if input_crs.is_geographic() else "%.3f"
-        if input_crs.is_geographic():
-            st.caption(
-                "Для таблицы WGS84 используйте decimal degrees: X = долгота, Y = широта."
-            )
+        editor_format = "%.3f"
+        st.caption(
+            "Входные X/Y для всех CRS задаются в метрах: "
+            "X = восточная, Y = северная координата."
+        )
         edited_points = st.data_editor(
             _default_batch_editor_frame(),
             key="crs_calc_batch_points",
@@ -2221,15 +2174,16 @@ def run_page() -> None:
             st.warning(
                 f"Пропущены строки без полной числовой пары X/Y: {invalid_row_count}."
             )
-        st.dataframe(
-            _batch_result_frame(
+        try:
+            batch_result = _batch_result_frame(
                 points=batch_points,
                 input_crs=input_crs,
                 output_crs=output_crs,
-            ),
-            hide_index=True,
-            width="stretch",
-        )
+            )
+        except CoordinateSystemError as exc:
+            st.error(f"Пересчёт таблицы не выполнен: {exc}")
+            batch_result = pd.DataFrame()
+        st.dataframe(batch_result, hide_index=True, width="stretch")
 
 
 if __name__ == "__main__":
@@ -12094,7 +12048,7 @@ SMALL: float = 1e-9
 __all__ = ["DEG2RAD", "RAD2DEG", "SMALL"]
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/coordinate_integration.py	28461
+===BEGIN_FILE===	pywp/coordinate_integration.py	34568
 """Integration of coordinate systems with trajectory planning UI.
 
 Provides sidebar controls and coordinate transformation for well trajectory results.
@@ -12104,6 +12058,7 @@ Default CRS: ГК_13N_42 / Pulkovo 1942 Gauss-Kruger CM 75E.
 from __future__ import annotations
 
 import logging
+import re
 from functools import lru_cache
 from typing import TYPE_CHECKING
 
@@ -12136,13 +12091,70 @@ CRS_SELECTED_KEY = "trajectory_crs_selected"  # CSV target CRS, kept for compati
 CRS_SELECTBOX_KEY = "trajectory_crs_selectbox"
 CRS_AUTO_CONVERT_KEY = "trajectory_crs_auto_convert"
 
+# Label-only migrations must retain the selected CRS and existing coordinates.
+CRS_LABEL_ALIASES = {"СК-42 Зона 13 (13 млн)": "СК-42 Зона 13"}
+
 # Default input CRS as per user requirement: ГК_13N_42.
 DEFAULT_CRS = CoordinateSystem.PULKOVO_1942_GK_13N
 DEFAULT_CSV_EXPORT_CRS = CoordinateSystem.WGS84_UTM_ZONE_43N
 
-# Available input CRS options. Input coordinates are treated as projected
-# orthogonal meter coordinates; the selected value is source CRS metadata for
-# CSV conversion and does not mutate calculation geometry.
+
+_CRS_SORT_TRANSLATION = str.maketrans(
+    {
+        "а": "a",
+        "б": "b",
+        "в": "v",
+        "г": "g",
+        "д": "d",
+        "е": "e",
+        "ё": "e",
+        "ж": "zh",
+        "з": "z",
+        "и": "i",
+        "й": "j",
+        "к": "k",
+        "л": "l",
+        "м": "m",
+        "н": "n",
+        "о": "o",
+        "п": "p",
+        "р": "r",
+        "с": "s",
+        "т": "t",
+        "у": "u",
+        "ф": "f",
+        "х": "h",
+        "ц": "c",
+        "ч": "ch",
+        "ш": "sh",
+        "щ": "shch",
+        "ъ": "",
+        "ы": "y",
+        "ь": "",
+        "э": "e",
+        "ю": "yu",
+        "я": "ya",
+    }
+)
+
+
+def _sort_crs_options(
+    options: list[tuple[str, CoordinateSystem]],
+) -> list[tuple[str, CoordinateSystem]]:
+    """Sort CRS labels alphabetically with natural numeric zone ordering."""
+    return sorted(
+        options,
+        key=lambda item: tuple(
+            int(part) if part.isdigit() else part.casefold().translate(_CRS_SORT_TRANSLATION)
+            for part in re.split(r"(\d+)", item[0])
+        ),
+    )
+
+# Available input CRS options for the trajectory planner. The selected value
+# is source CRS metadata for CSV conversion and does not mutate calculation
+# geometry. Keep this list projected-only: planner coordinates are Cartesian
+# metre values, while geographic longitude/latitude requires a separate input
+# flow with explicit normalization.
 INPUT_CRS_OPTIONS: list[tuple[str, CoordinateSystem]] = [
     ("СК-42 Зона 6", CoordinateSystem.PULKOVO_1942_ZONE_6),
     ("СК-42 Зона 7", CoordinateSystem.PULKOVO_1942_ZONE_7),
@@ -12151,8 +12163,7 @@ INPUT_CRS_OPTIONS: list[tuple[str, CoordinateSystem]] = [
     ("СК-42 Зона 10", CoordinateSystem.PULKOVO_1942_ZONE_10),
     ("СК-42 Зона 11", CoordinateSystem.PULKOVO_1942_ZONE_11),
     ("СК-42 Зона 12", CoordinateSystem.PULKOVO_1942_ZONE_12),
-    ("ГК_13N_42", CoordinateSystem.PULKOVO_1942_GK_13N),
-    ("СК-42 Зона 13 (13 млн)", CoordinateSystem.PULKOVO_1942_ZONE_13),
+    ("СК-42 Зона 13", CoordinateSystem.PULKOVO_1942_ZONE_13),
     ("СК-42 Зона 14", CoordinateSystem.PULKOVO_1942_ZONE_14),
     ("СК-42 Зона 15", CoordinateSystem.PULKOVO_1942_ZONE_15),
     ("СК-42 Зона 16", CoordinateSystem.PULKOVO_1942_ZONE_16),
@@ -12160,12 +12171,47 @@ INPUT_CRS_OPTIONS: list[tuple[str, CoordinateSystem]] = [
     ("СК-42 Зона 18", CoordinateSystem.PULKOVO_1942_ZONE_18),
     ("СК-42 Зона 19", CoordinateSystem.PULKOVO_1942_ZONE_19),
     ("СК-42 Зона 20", CoordinateSystem.PULKOVO_1942_ZONE_20),
+    ("ГК_6N_42", CoordinateSystem.PULKOVO_1942_GK_6N),
+    ("ГК_7N_42", CoordinateSystem.PULKOVO_1942_GK_7N),
+    ("ГК_8N_42", CoordinateSystem.PULKOVO_1942_GK_8N),
+    ("ГК_9N_42", CoordinateSystem.PULKOVO_1942_GK_9N),
+    ("ГК_10N_42", CoordinateSystem.PULKOVO_1942_GK_10N),
+    ("ГК_11N_42", CoordinateSystem.PULKOVO_1942_GK_11N),
+    ("ГК_12N_42", CoordinateSystem.PULKOVO_1942_GK_12N),
+    ("ГК_13N_42", CoordinateSystem.PULKOVO_1942_GK_13N),
+    ("ГК_14N_42", CoordinateSystem.PULKOVO_1942_GK_14N),
+    ("ГК_15N_42", CoordinateSystem.PULKOVO_1942_GK_15N),
+    ("ГК_16N_42", CoordinateSystem.PULKOVO_1942_GK_16N),
+    ("ГК_17N_42", CoordinateSystem.PULKOVO_1942_GK_17N),
+    ("ГК_18N_42", CoordinateSystem.PULKOVO_1942_GK_18N),
+    ("ГК_19N_42", CoordinateSystem.PULKOVO_1942_GK_19N),
+    ("ГК_20N_42", CoordinateSystem.PULKOVO_1942_GK_20N),
     ("Пулково 1995 Зона 13", CoordinateSystem.PULKOVO_1995_ZONE_13),
     ("Пулково 1995 Зона 18", CoordinateSystem.PULKOVO_1995_ZONE_18),
     ("Пулково 1995 CM 39E", CoordinateSystem.PULKOVO_1995_CM_39E),
+    ("ГСК2011 Зона 6", CoordinateSystem.GSK_2011_ZONE_6),
+    ("ГСК2011 Зона 7", CoordinateSystem.GSK_2011_ZONE_7),
+    ("ГСК2011 Зона 8", CoordinateSystem.GSK_2011_ZONE_8),
+    ("ГСК2011 Зона 9", CoordinateSystem.GSK_2011_ZONE_9),
+    ("ГСК2011 Зона 10", CoordinateSystem.GSK_2011_ZONE_10),
+    ("ГСК2011 Зона 11", CoordinateSystem.GSK_2011_ZONE_11),
+    ("ГСК2011 Зона 12", CoordinateSystem.GSK_2011_ZONE_12),
+    ("ГСК2011 Зона 13", CoordinateSystem.GSK_2011_ZONE_13),
+    ("ГСК2011 Зона 14", CoordinateSystem.GSK_2011_ZONE_14),
+    ("ГСК2011 Зона 15", CoordinateSystem.GSK_2011_ZONE_15),
+    ("ГСК2011 Зона 16", CoordinateSystem.GSK_2011_ZONE_16),
+    ("ГСК2011 Зона 17", CoordinateSystem.GSK_2011_ZONE_17),
+    ("ГСК2011 Зона 18", CoordinateSystem.GSK_2011_ZONE_18),
+    ("ГСК2011 Зона 19", CoordinateSystem.GSK_2011_ZONE_19),
+    ("ГСК2011 Зона 20", CoordinateSystem.GSK_2011_ZONE_20),
     ("МСК-89", CoordinateSystem.MSK_89),
     ("WGS84 UTM 43N", CoordinateSystem.WGS84_UTM_ZONE_43N),
 ]
+INPUT_CRS_OPTIONS = _sort_crs_options(INPUT_CRS_OPTIONS)
+
+# The standalone calculator uses the same rectangular input CRS contract as
+# the trajectory planner. Geographic CRS are output-only and are listed below.
+CALCULATOR_INPUT_CRS_OPTIONS: list[tuple[str, CoordinateSystem]] = INPUT_CRS_OPTIONS
 
 # CSV output CRS options. CSV export is intentionally restricted to the small
 # set used in the product flow: one default input GK option, one projected UTM
@@ -12175,12 +12221,32 @@ CSV_CRS_OPTIONS: list[tuple[str, CoordinateSystem]] = [
     ("WGS84 UTM 43N", CoordinateSystem.WGS84_UTM_ZONE_43N),
     ("WGS84 (градусы)", CoordinateSystem.WGS84),
 ]
+CSV_CRS_OPTIONS = _sort_crs_options(CSV_CRS_OPTIONS)
+
+CALCULATOR_OUTPUT_CRS_OPTIONS: list[tuple[str, CoordinateSystem]] = [
+    (label, crs)
+    for label, crs in INPUT_CRS_OPTIONS
+    if crs != CoordinateSystem.MSK_89
+]
+CALCULATOR_OUTPUT_CRS_OPTIONS.extend(
+    [
+        ("ГСК2011 (градусы)", CoordinateSystem.GSK_2011),
+        ("WGS84 (градусы)", CoordinateSystem.WGS84),
+    ]
+)
+CALCULATOR_OUTPUT_CRS_OPTIONS = _sort_crs_options(CALCULATOR_OUTPUT_CRS_OPTIONS)
 
 # Backwards-compatible name for code/tests that refer to CSV CRS choices.
 CRS_OPTIONS = CSV_CRS_OPTIONS
 
 INPUT_CRS_LABEL_BY_VALUE: dict[CoordinateSystem, str] = {
     crs: label for label, crs in INPUT_CRS_OPTIONS
+}
+CALCULATOR_INPUT_CRS_LABEL_BY_VALUE: dict[CoordinateSystem, str] = {
+    crs: label for label, crs in CALCULATOR_INPUT_CRS_OPTIONS
+}
+CALCULATOR_OUTPUT_CRS_LABEL_BY_VALUE: dict[CoordinateSystem, str] = {
+    crs: label for label, crs in CALCULATOR_OUTPUT_CRS_OPTIONS
 }
 CRS_LABEL_BY_VALUE: dict[CoordinateSystem, str] = {
     crs: label for label, crs in CSV_CRS_OPTIONS
@@ -12246,6 +12312,9 @@ def render_crs_sidebar() -> CoordinateSystem:
             st.session_state[CRS_SELECTED_KEY] = DEFAULT_CSV_EXPORT_CRS
 
         input_option_labels = [label for label, _ in INPUT_CRS_OPTIONS]
+        previous_label = st.session_state.get(CRS_INPUT_SELECTBOX_KEY)
+        if previous_label in CRS_LABEL_ALIASES:
+            st.session_state[CRS_INPUT_SELECTBOX_KEY] = CRS_LABEL_ALIASES[previous_label]
         if st.session_state.get(CRS_INPUT_SELECTBOX_KEY) not in input_option_labels:
             st.session_state.pop(CRS_INPUT_SELECTBOX_KEY, None)
         selected_input_label = st.selectbox(
@@ -12258,7 +12327,9 @@ def render_crs_sidebar() -> CoordinateSystem:
             ),
             key=CRS_INPUT_SELECTBOX_KEY,
             help=(
-                "Система координат исходных X/Y. Расчёт и отображение ведутся в этих координатах."
+                "Система координат исходных X/Y. Расчёт и отображение ведутся в этих координатах. "
+                "СК-42 Зона N — полный зональный отсчёт; ГК_NN_42 — сокращённый, "
+                "без номера зоны в миллионах."
             ),
         )
         input_crs = next(
@@ -12489,27 +12560,38 @@ def _transform_xy(
     y: float,
     from_crs: CoordinateSystem,
     to_crs: CoordinateSystem,
+    *,
+    strict: bool = False,
 ) -> tuple[float, float]:
     """Transform horizontal coordinates (x, y) between CRSs.
 
     Returns:
-        (transformed_x, transformed_y) or original if transformation fails.
+        Transformed values; legacy callers retain originals on failure.
+        With strict=True failures raise CoordinateSystemError instead.
     """
+    if strict and not _is_finite_xy(x, y):
+        raise CoordinateSystemError("X/Y must be finite numbers.")
     if from_crs == to_crs:
         return x, y
 
     transformer = _try_create_transformer()
     if transformer is None:
+        if strict:
+            raise CoordinateSystemError("Coordinate transformer is unavailable.")
         return x, y
 
     effective_from = _effective_pyproj_crs(from_crs)
     effective_to = _effective_pyproj_crs(to_crs)
     if effective_from is None or effective_to is None:
+        if strict:
+            raise CoordinateSystemError("Transformation parameters are unavailable for this CRS pair.")
         return x, y
     if effective_from == effective_to:
         return x, y
 
     if not _can_transform_directly(from_crs, to_crs):
+        if strict:
+            raise CoordinateSystemError("Direct transformation is unsupported for this CRS pair.")
         return x, y
 
     try:
@@ -12554,6 +12636,10 @@ def _transform_xy(
             ):
                 return result.lon_deg, result.lat_deg
     except Exception as exc:
+        if strict:
+            raise CoordinateSystemError(
+                f"Coordinate transformation failed ({from_crs.name} -> {to_crs.name})."
+            ) from exc
         logger.warning(
             f"Coordinate transformation failed ({from_crs.name} -> {to_crs.name}): {exc}"
         )
@@ -12563,6 +12649,8 @@ def _transform_xy(
             f"({from_crs.name} -> {to_crs.name})."
         )
 
+    if strict:
+        raise CoordinateSystemError("Coordinate transformation returned an invalid result.")
     return x, y
 
 
@@ -12579,6 +12667,16 @@ def transform_xy_to_crs(
     """Transform horizontal X/Y coordinates using the CSV export CRS engine."""
 
     return _transform_xy(float(x), float(y), from_crs, to_crs)
+
+
+def strict_transform_xy_to_crs(
+    x: float,
+    y: float,
+    from_crs: CoordinateSystem,
+    to_crs: CoordinateSystem,
+) -> tuple[float, float]:
+    """Transform X/Y, raising on failure so a calculator cannot mislabel originals."""
+    return _transform_xy(float(x), float(y), from_crs, to_crs, strict=True)
 
 
 def transform_point_to_crs(
@@ -12887,7 +12985,7 @@ def get_crs_display_suffix(crs: CoordinateSystem) -> str:
         CoordinateSystem.PULKOVO_1995: " (П95)",
         CoordinateSystem.PULKOVO_1995_CM_39E: " (П95/CM39)",
         CoordinateSystem.MSK_89: " (МСК-89)",
-        CoordinateSystem.GSK_2011: " (ГСК)",
+        CoordinateSystem.GSK_2011: " (ГСК2011)",
         CoordinateSystem.WGS84: " (WGS)",
     }
 
@@ -12896,6 +12994,12 @@ def get_crs_display_suffix(crs: CoordinateSystem) -> str:
         zone_crs = getattr(CoordinateSystem, f"PULKOVO_1942_ZONE_{zone_num}", None)
         if zone_crs:
             suffix_map[zone_crs] = f" (СК-42/З{zone_num})"
+        gk_crs = getattr(CoordinateSystem, f"PULKOVO_1942_GK_{zone_num}N", None)
+        if gk_crs:
+            suffix_map[gk_crs] = f" (ГК_{zone_num}N_42)"
+        gsk_zone_crs = getattr(CoordinateSystem, f"GSK_2011_ZONE_{zone_num}", None)
+        if gsk_zone_crs:
+            suffix_map[gsk_zone_crs] = f" (ГСК2011/З{zone_num})"
     suffix_map[CoordinateSystem.PULKOVO_1942_GK_13N] = " (ГК_13N_42)"
     suffix_map[CoordinateSystem.WGS84_UTM_ZONE_43N] = " (WGS84/UTM43N)"
 
@@ -12914,6 +13018,7 @@ __all__ = [
     "get_selected_crs",
     "should_auto_convert",
     "transform_xy_to_crs",
+    "strict_transform_xy_to_crs",
     "transform_point_to_crs",
     "transform_stations_to_crs",
     "meridian_convergence_series_deg",
@@ -12925,6 +13030,11 @@ __all__ = [
     "DEFAULT_CRS",
     "DEFAULT_CSV_EXPORT_CRS",
     "INPUT_CRS_OPTIONS",
+    "CRS_LABEL_ALIASES",
+    "CALCULATOR_INPUT_CRS_OPTIONS",
+    "CALCULATOR_INPUT_CRS_LABEL_BY_VALUE",
+    "CALCULATOR_OUTPUT_CRS_OPTIONS",
+    "CALCULATOR_OUTPUT_CRS_LABEL_BY_VALUE",
     "CSV_CRS_OPTIONS",
     "CRS_OPTIONS",
     "_can_transform_directly",
@@ -12933,7 +13043,7 @@ __all__ = [
 ]
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/coordinate_systems.py	16787
+===BEGIN_FILE===	pywp/coordinate_systems.py	18179
 """Coordinate system transformations for well trajectory planning.
 
 Supports Russian petroleum industry coordinate systems:
@@ -12948,14 +13058,14 @@ For projected coordinates (Gauss-Kruger, UTM), use zone-specific EPSG codes.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum, auto
+from enum import Enum
 from typing import NamedTuple
 
 import numpy as np
 
 # Optional pyproj support
 try:
-    from pyproj import Transformer, CRS
+    from pyproj import Transformer
 
     HAS_PYPROJ = True
 except ImportError:
@@ -12984,11 +13094,26 @@ class CoordinateSystem(Enum):
     GSK_2011_GEOCENTRIC = "EPSG:7681"  # GSK-2011 geocentric X/Y/Z, metres
     GSK_2011 = "EPSG:7683"  # ГСК-2011 geographic 2D, degrees
 
+    # GSK-2011 Gauss-Kruger six-degree zones. The zone number is part of the
+    # CRS definition and must be selected explicitly for rectangular input.
+    GSK_2011_ZONE_6 = "EPSG:20906"
+    GSK_2011_ZONE_7 = "EPSG:20907"
+    GSK_2011_ZONE_8 = "EPSG:20908"
+    GSK_2011_ZONE_9 = "EPSG:20909"
+    GSK_2011_ZONE_10 = "EPSG:20910"
+    GSK_2011_ZONE_11 = "EPSG:20911"
+    GSK_2011_ZONE_12 = "EPSG:20912"
+    GSK_2011_ZONE_13 = "EPSG:20913"
+    GSK_2011_ZONE_14 = "EPSG:20914"
+    GSK_2011_ZONE_15 = "EPSG:20915"
+    GSK_2011_ZONE_16 = "EPSG:20916"
+    GSK_2011_ZONE_17 = "EPSG:20917"
+    GSK_2011_ZONE_18 = "EPSG:20918"
+    GSK_2011_ZONE_19 = "EPSG:20919"
+    GSK_2011_ZONE_20 = "EPSG:20920"
+
     # Pulkovo 1942 Gauss-Kruger zones (6-degree, legacy).
-    # EPSG:28413 carries zone-prefixed false easting 13,500,000 m.
-    # EPSG:2503 is the non-deprecated truncated CM 75E form equivalent
-    # to the deprecated EPSG:28473 "Gauss-Kruger 13N" definition.
-    PULKOVO_1942_GK_13N = "EPSG:2503"    # CM 75°, false easting 500,000 m
+    # Full zone-prefixed CRS: false easting is zone * 1,000,000 + 500,000 m.
     PULKOVO_1942_ZONE_6 = "EPSG:28406"   # CM 33°
     PULKOVO_1942_ZONE_7 = "EPSG:28407"   # CM 39°
     PULKOVO_1942_ZONE_8 = "EPSG:28408"   # CM 45°
@@ -13004,6 +13129,25 @@ class CoordinateSystem(Enum):
     PULKOVO_1942_ZONE_18 = "EPSG:28418"  # CM 105°
     PULKOVO_1942_ZONE_19 = "EPSG:28419"  # CM 111°
     PULKOVO_1942_ZONE_20 = "EPSG:28420"  # CM 117°
+
+    # Truncated Gauss-Kruger CRS: false easting is 500,000 m. These are the
+    # official EPSG CM definitions; zone 13 is the application's verified
+    # default input CRS (EPSG:2503).
+    PULKOVO_1942_GK_6N = "EPSG:2496"    # CM 33°
+    PULKOVO_1942_GK_7N = "EPSG:2497"    # CM 39°
+    PULKOVO_1942_GK_8N = "EPSG:2498"    # CM 45°
+    PULKOVO_1942_GK_9N = "EPSG:2499"    # CM 51°
+    PULKOVO_1942_GK_10N = "EPSG:2500"  # CM 57°
+    PULKOVO_1942_GK_11N = "EPSG:2501"  # CM 63°
+    PULKOVO_1942_GK_12N = "EPSG:2502"  # CM 69°
+    PULKOVO_1942_GK_13N = "EPSG:2503"  # CM 75°
+    PULKOVO_1942_GK_14N = "EPSG:2504"  # CM 81°
+    PULKOVO_1942_GK_15N = "EPSG:2505"  # CM 87°
+    PULKOVO_1942_GK_16N = "EPSG:2506"  # CM 93°
+    PULKOVO_1942_GK_17N = "EPSG:2507"  # CM 99°
+    PULKOVO_1942_GK_18N = "EPSG:2508"  # CM 105°
+    PULKOVO_1942_GK_19N = "EPSG:2509"  # CM 111°
+    PULKOVO_1942_GK_20N = "EPSG:2510"  # CM 117°
 
     # Pulkovo 1995 Gauss-Kruger zones (modern, per PDF EPSG:2472, 20073)
     PULKOVO_1995_ZONE_13 = "EPSG:2472"   # Zone 13, CM 75°E
@@ -61012,7 +61156,7 @@ class FastReplan {
 </html>
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/three_viewer_assets/templates/viewer_template.html	439967
+===BEGIN_FILE===	pywp/three_viewer_assets/templates/viewer_template.html	475585
 <!doctype html>
 <html lang="en">
   <head>
@@ -61933,6 +62077,15 @@ class FastReplan {
         gap: 4px;
       }
 
+      #edit-scope-selector.scope-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      #edit-scope-selector.scope-grid .scope-btn:last-child {
+        grid-column: 1 / -1;
+      }
+
       .plane-btn,
       .operation-btn,
       .scope-btn,
@@ -62051,6 +62204,236 @@ class FastReplan {
         margin-top: 2px;
         padding-top: 4px;
         border-top: 1px solid rgba(15,23,42,0.08);
+      }
+
+      #edit-inspector {
+        display: none;
+        position: absolute;
+        top: 52px;
+        left: 402px;
+        width: 326px;
+        max-width: min(326px, calc(100% - 20px));
+        max-height: calc(100% - 72px);
+        overflow: auto;
+        z-index: 6;
+        padding: 10px;
+        box-sizing: border-box;
+        border-radius: 12px;
+        background: rgba(255,255,255,0.97);
+        box-shadow: 0 10px 28px rgba(15,23,42,0.14);
+        color: #334155;
+      }
+
+      #edit-inspector.is-visible {
+        display: flex;
+        flex-direction: column;
+        gap: 9px;
+      }
+
+      .edit-inspector-title {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        color: #0f172a;
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      .edit-inspector-subtitle {
+        color: #64748b;
+        font-size: 10px;
+        line-height: 1.3;
+      }
+
+      .edit-inspector-search,
+      .edit-inspector-input,
+      .edit-inspector-select {
+        width: 100%;
+        min-height: 28px;
+        box-sizing: border-box;
+        border: 1px solid rgba(100,116,139,0.28);
+        border-radius: 7px;
+        background: #fff;
+        color: #0f172a;
+        font: inherit;
+        font-size: 11px;
+        padding: 5px 7px;
+      }
+
+      .edit-inspector-search:focus,
+      .edit-inspector-input:focus,
+      .edit-inspector-select:focus {
+        outline: 2px solid rgba(37,99,235,0.18);
+        border-color: rgba(37,99,235,0.62);
+      }
+
+      .edit-point-list {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        max-height: 178px;
+        overflow: auto;
+        padding: 2px;
+        border: 1px solid rgba(148,163,184,0.22);
+        border-radius: 8px;
+        background: rgba(248,250,252,0.72);
+      }
+
+      .edit-point-list-group {
+        padding: 4px 5px 2px;
+        color: #64748b;
+        font-size: 10px;
+        font-weight: 700;
+        text-transform: uppercase;
+      }
+
+      .edit-point-list-item {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 8px;
+        align-items: center;
+        width: 100%;
+        border: 1px solid transparent;
+        border-radius: 6px;
+        background: transparent;
+        color: #334155;
+        cursor: pointer;
+        font: inherit;
+        font-size: 11px;
+        padding: 5px 6px;
+        text-align: left;
+      }
+
+      .edit-point-list-item:hover {
+        background: rgba(37,99,235,0.07);
+      }
+
+      .edit-point-list-item.is-active {
+        border-color: rgba(37,99,235,0.36);
+        background: rgba(37,99,235,0.12);
+        color: #1d4ed8;
+        font-weight: 700;
+      }
+
+      .edit-point-list-meta {
+        color: #64748b;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 9px;
+        white-space: nowrap;
+      }
+
+      .edit-inspector-section {
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+        padding-top: 7px;
+        border-top: 1px solid rgba(148,163,184,0.2);
+      }
+
+      .edit-inspector-section-label {
+        color: #64748b;
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+        text-transform: uppercase;
+      }
+
+      .edit-inspector-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 5px;
+      }
+
+      .edit-inspector-field {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        min-width: 0;
+      }
+
+      .edit-inspector-field label {
+        color: #64748b;
+        font-size: 9px;
+        font-weight: 700;
+      }
+
+      .edit-inspector-actions {
+        display: flex;
+        gap: 5px;
+      }
+
+      .edit-inspector-action {
+        flex: 1 1 0;
+        min-width: 0;
+        border: 1px solid rgba(37,99,235,0.22);
+        border-radius: 7px;
+        background: rgba(248,250,252,0.96);
+        color: #1d4ed8;
+        cursor: pointer;
+        font-size: 10px;
+        font-weight: 700;
+        padding: 6px 5px;
+      }
+
+      .edit-inspector-action:hover:not(:disabled) {
+        background: rgba(37,99,235,0.09);
+      }
+
+      .edit-inspector-action:disabled {
+        cursor: default;
+        opacity: 0.42;
+      }
+
+      .edit-inspector-note {
+        color: #64748b;
+        font-size: 10px;
+        line-height: 1.35;
+      }
+
+      .edit-preview-status {
+        display: flex;
+        align-items: flex-start;
+        gap: 6px;
+        border-radius: 7px;
+        background: rgba(245,158,11,0.1);
+        color: #92400e;
+        font-size: 10px;
+        line-height: 1.35;
+        padding: 6px 7px;
+      }
+
+      .edit-pad-wells {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        max-height: 150px;
+        overflow: auto;
+      }
+
+      .edit-pad-well-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto auto;
+        gap: 5px;
+        align-items: center;
+        color: #475569;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 9px;
+      }
+
+      .edit-pad-well-row strong {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      @media (max-width: 840px) {
+        #edit-inspector {
+          left: 10px;
+          top: auto;
+          bottom: 54px;
+          max-height: min(54vh, 520px);
+        }
       }
 
       .edit-delta-label {
@@ -62797,9 +63180,12 @@ class FastReplan {
           </div>
           <div class="edit-toolbox-section">
             <div class="edit-toolbox-label">Точки</div>
-            <div id="edit-scope-selector">
-              <button class="scope-btn is-active" data-scope="point" type="button">Одна</button>
-              <button class="scope-btn" data-scope="pair" type="button">Все</button>
+            <div id="edit-scope-selector" class="scope-grid">
+              <button class="scope-btn is-active" data-scope="point" type="button">Одна точка</button>
+              <button class="scope-btn" data-scope="pair" type="button">Пара t1–t3</button>
+              <button class="scope-btn" data-scope="well" type="button">Все точки</button>
+              <button class="scope-btn" data-scope="after" type="button">После точки</button>
+              <button class="scope-btn" data-scope="selected" type="button">Выбранные скважины</button>
             </div>
           </div>
           <div class="edit-toolbox-section">
@@ -62824,6 +63210,74 @@ class FastReplan {
               <button id="edit-reset-btn" class="edit-tool-btn is-reset" type="button" title="Вернуть выбранную скважину к исходным точкам">Сброс</button>
             </div>
           </div>
+        </div>
+      </div>
+      <div id="edit-inspector">
+        <div class="edit-inspector-title">
+          <span id="edit-inspector-title">Редактирование</span>
+          <span id="edit-selection-count"></span>
+        </div>
+        <div id="edit-inspector-selection" class="edit-inspector-subtitle">Выберите скважину или куст</div>
+        <input
+          id="edit-point-filter"
+          class="edit-inspector-search"
+          type="search"
+          autocomplete="off"
+          placeholder="Фильтр по label, MD или типу"
+        />
+        <div id="edit-point-list" class="edit-point-list"></div>
+
+        <div id="edit-point-editor" class="edit-inspector-section">
+          <div class="edit-inspector-section-label">Точка</div>
+          <div id="edit-point-editor-title" class="edit-inspector-title"></div>
+          <div id="edit-point-editor-meta" class="edit-inspector-subtitle"></div>
+          <div class="edit-inspector-grid">
+            <div class="edit-inspector-field"><label for="edit-coordinate-x">X</label><input id="edit-coordinate-x" class="edit-inspector-input" type="number" step="0.01" /></div>
+            <div class="edit-inspector-field"><label for="edit-coordinate-y">Y</label><input id="edit-coordinate-y" class="edit-inspector-input" type="number" step="0.01" /></div>
+            <div class="edit-inspector-field"><label for="edit-coordinate-z">Z / TVD</label><input id="edit-coordinate-z" class="edit-inspector-input" type="number" step="0.01" /></div>
+          </div>
+          <div class="edit-inspector-grid">
+            <div class="edit-inspector-field"><label for="edit-delta-x">ΔX</label><input id="edit-delta-x" class="edit-inspector-input" type="number" step="0.01" placeholder="0" /></div>
+            <div class="edit-inspector-field"><label for="edit-delta-y">ΔY</label><input id="edit-delta-y" class="edit-inspector-input" type="number" step="0.01" placeholder="0" /></div>
+            <div class="edit-inspector-field"><label for="edit-delta-z">ΔZ</label><input id="edit-delta-z" class="edit-inspector-input" type="number" step="0.01" placeholder="0" /></div>
+          </div>
+          <div class="edit-inspector-actions">
+            <button id="edit-apply-coordinates" class="edit-inspector-action" type="button">Применить XYZ</button>
+            <button id="edit-apply-delta" class="edit-inspector-action" type="button">Применить Δ</button>
+            <select id="edit-edit-step" class="edit-inspector-select" aria-label="Шаг редактирования">
+              <option value="0.01">0,01 м</option>
+              <option value="0.1">0,1 м</option>
+              <option value="1">1 м</option>
+              <option value="10">10 м</option>
+            </select>
+          </div>
+          <div id="edit-z-note" class="edit-inspector-note"></div>
+        </div>
+
+        <div id="edit-sidetrack-editor" class="edit-inspector-section" style="display:none">
+          <div class="edit-inspector-section-label">Окно sidetrack</div>
+          <div id="edit-sidetrack-parent" class="edit-inspector-subtitle"></div>
+          <div class="edit-inspector-grid">
+            <div class="edit-inspector-field"><label for="edit-sidetrack-md">MD, м</label><input id="edit-sidetrack-md" class="edit-inspector-input" type="number" step="0.01" /></div>
+            <div class="edit-inspector-field"><label for="edit-sidetrack-tvd">TVD, м</label><input id="edit-sidetrack-tvd" class="edit-inspector-input" type="number" step="0.01" readonly /></div>
+          </div>
+          <div id="edit-sidetrack-range" class="edit-inspector-note"></div>
+          <button id="edit-apply-sidetrack" class="edit-inspector-action" type="button">Применить MD</button>
+        </div>
+
+        <div id="edit-pad-summary" class="edit-inspector-section" style="display:none">
+          <div class="edit-inspector-section-label">Куст</div>
+          <div id="edit-pad-summary-title" class="edit-inspector-title"></div>
+          <div id="edit-pad-summary-mode" class="edit-inspector-subtitle"></div>
+          <div class="edit-pad-summary-row"><span>ΔX / ΔY</span><strong><span id="edit-pad-delta-x">0,0 м</span> / <span id="edit-pad-delta-y">0,0 м</span></strong></div>
+          <div class="edit-pad-summary-row"><span>Anchor X / Y</span><strong><span id="edit-pad-final-x">0,0 м</span> / <span id="edit-pad-final-y">0,0 м</span></strong></div>
+          <div class="edit-pad-summary-row"><span>НДС</span><strong id="edit-pad-final-nds">0,0°</strong></div>
+          <div id="edit-pad-well-list" class="edit-pad-wells"></div>
+        </div>
+
+        <div id="edit-preview-status" class="edit-preview-status">
+          <span aria-hidden="true">●</span>
+          <span id="edit-preview-status-text">Предварительный статус появится после выбора объекта.</span>
         </div>
       </div>
       <button id="edit-save-btn" type="button">Сохранить изменения</button>
@@ -62950,7 +63404,16 @@ class FastReplan {
           const meshItems = Array.isArray(payloadValue && payloadValue.meshes)
             ? payloadValue.meshes
             : [];
+          const editWellItems = Array.isArray(payloadValue && payloadValue.edit_wells)
+            ? payloadValue.edit_wells : [];
+          const editPointCount = editWellItems.reduce(
+            (acc, well) => acc + (Array.isArray(well && well.edit_points)
+              ? well.edit_points.length : 2), 0,
+          );
+          const editPadCount = Array.isArray(payloadValue && payloadValue.edit_pads)
+            ? payloadValue.edit_pads.length : 0;
           return (
+            editPointCount * 8 + editPadCount * 32 +
             lineItems.reduce(
               (acc, item) =>
                 acc +
@@ -68219,6 +68682,31 @@ class FastReplan {
         const editRedoBtn = document.getElementById("edit-redo-btn");
         const editResetBtn = document.getElementById("edit-reset-btn");
         const editSaveBtn = document.getElementById("edit-save-btn");
+        const editInspector = document.getElementById("edit-inspector");
+        const editInspectorTitle = document.getElementById("edit-inspector-title");
+        const editSelectionCount = document.getElementById("edit-selection-count");
+        const editInspectorSelection = document.getElementById("edit-inspector-selection");
+        const editPointFilter = document.getElementById("edit-point-filter");
+        const editPointList = document.getElementById("edit-point-list");
+        const editPointEditor = document.getElementById("edit-point-editor");
+        const editPointEditorTitle = document.getElementById("edit-point-editor-title");
+        const editPointEditorMeta = document.getElementById("edit-point-editor-meta");
+        const editCoordinateX = document.getElementById("edit-coordinate-x");
+        const editCoordinateY = document.getElementById("edit-coordinate-y");
+        const editCoordinateZ = document.getElementById("edit-coordinate-z");
+        const editDeltaX = document.getElementById("edit-delta-x");
+        const editDeltaY = document.getElementById("edit-delta-y");
+        const editDeltaZ = document.getElementById("edit-delta-z");
+        const editApplyCoordinates = document.getElementById("edit-apply-coordinates");
+        const editApplyDelta = document.getElementById("edit-apply-delta");
+        const editEditStep = document.getElementById("edit-edit-step");
+        const editZNote = document.getElementById("edit-z-note");
+        const editSidetrackEditor = document.getElementById("edit-sidetrack-editor");
+        const editSidetrackParent = document.getElementById("edit-sidetrack-parent");
+        const editSidetrackMd = document.getElementById("edit-sidetrack-md");
+        const editSidetrackTvd = document.getElementById("edit-sidetrack-tvd");
+        const editSidetrackRange = document.getElementById("edit-sidetrack-range");
+        const editApplySidetrack = document.getElementById("edit-apply-sidetrack");
         const editPadSummary = document.getElementById("edit-pad-summary");
         const editPadSummaryTitle = document.getElementById("edit-pad-summary-title");
         const editPadSummaryMode = document.getElementById("edit-pad-summary-mode");
@@ -68226,6 +68714,10 @@ class FastReplan {
         const editPadDeltaY = document.getElementById("edit-pad-delta-y");
         const editPadFinalX = document.getElementById("edit-pad-final-x");
         const editPadFinalY = document.getElementById("edit-pad-final-y");
+        const editPadFinalNds = document.getElementById("edit-pad-final-nds");
+        const editPadWellList = document.getElementById("edit-pad-well-list");
+        const editPreviewStatus = document.getElementById("edit-preview-status");
+        const editPreviewStatusText = document.getElementById("edit-preview-status-text");
         const editWarningToast = document.getElementById("edit-warning-toast");
         const editWarningHideBtn = document.getElementById("edit-warning-hide-btn");
         const hasEditUiElements = Boolean(
@@ -68238,7 +68730,8 @@ class FastReplan {
           editUndoBtn &&
           editRedoBtn &&
           editResetBtn &&
-          editSaveBtn
+          editSaveBtn &&
+          editInspector
         );
         let canEditTargets = false;
 
@@ -68254,7 +68747,7 @@ class FastReplan {
 
         let editModeActive = false;
         let editPlane = "xy"; // "xy" | "z"
-        let editMoveScope = "point"; // "point" | "pair"
+        let editMoveScope = "point"; // point | pair | well | after | selected
         let editTransformMode = "move"; // "move" | "rotate"
         const editHandles = []; // {mesh, pickMesh, previewMesh, originalMesh, wellIndex, pointType, pointIndex, dataPos[3], guide}
         const editPadMarkers = []; // {mesh, pickMesh, originalMesh, selectionMesh, ndsArrow, rotationControl, label, padIndex, wellIndex, padLabel, pointLabel, dataPos[3], visualPos[3], ndsAzimuthDeg, spacingM, color}
@@ -68271,6 +68764,11 @@ class FastReplan {
         const editPadOriginalNds = []; // original NDS azimuth deg per pad
         const editPadCurrentNds = []; // current NDS azimuth deg per pad
         const editPadDirtyFlags = []; // boolean per pad
+        const editPadUndoStacks = [];
+        const editPadRedoStacks = [];
+        let editPadDragHistoryStartState = null;
+        let editPadRotateHistoryStartState = null;
+        const EDIT_HANDLE_LABEL_LIMIT = 80;
         let miniMapEditPositionLabel = null;
         const editOriginalPoints = []; // all editable target points per well
         const editCurrentPoints = []; // current editable target points per well
@@ -68314,6 +68812,7 @@ class FastReplan {
         let editHasAnyChange = false;
         let editWarningDismissed = false;
         let selectedEditHandleIndex = null;
+        let editInspectorListKey = "";
         let editBroadcastChannel = null;
         let editSavePendingTimeoutId = null;
         const EDIT_SAVE_DEFAULT_TEXT = "Сохранить изменения";
@@ -68886,8 +69385,7 @@ class FastReplan {
           const handle = selectedEditHandle();
           if (
             handle &&
-            handle.wellIndex === selectedEditWellIndex &&
-            handle.pointRole !== "sidetrack_window"
+            handle.wellIndex === selectedEditWellIndex
           ) {
             return;
           }
@@ -68918,7 +69416,7 @@ class FastReplan {
         function selectedEditPointRole() {
           const handle = selectedEditHandle();
           const pointRole = String((handle && handle.pointRole) || "");
-          return pointRole === "t1" || pointRole === "t3" ? pointRole : "t3";
+          return pointRole || "t3";
         }
 
         function setSelectedEditHandleByRole(pointRole) {
@@ -68945,6 +69443,231 @@ class FastReplan {
           syncEditToolboxState();
           requestRender();
           return true;
+        }
+
+        function handleIndexForWellPoint(wellIndex, pointIndex) {
+          const targetWell = Number(wellIndex);
+          const targetPoint = Number(pointIndex);
+          if (!Number.isInteger(targetWell) || !Number.isInteger(targetPoint)) {
+            return null;
+          }
+          for (let index = 0; index < editHandles.length; index += 1) {
+            const handle = editHandles[index];
+            if (
+              handle &&
+              handle.wellIndex === targetWell &&
+              handle.pointIndex === targetPoint
+            ) {
+              return index;
+            }
+          }
+          return null;
+        }
+
+        function editPointEntryForHandle(handle) {
+          if (!handle || !Number.isInteger(handle.wellIndex)) {
+            return null;
+          }
+          const entries = editCurrentPoints[handle.wellIndex] || [];
+          return entries[handle.pointIndex] || null;
+        }
+
+        function editPointMd(entry) {
+          if (!entry) {
+            return NaN;
+          }
+          const sidetrack = entry.sidetrackWindow || entry.sidetrack_window;
+          return Number(
+            (sidetrack && (sidetrack.valueM ?? sidetrack.value_m)) ??
+            (entry.mdM ?? entry.md_m ?? entry.md),
+          );
+        }
+
+        function editPointRoleTitle(handle) {
+          const role = String((handle && handle.pointRole) || "point");
+          if (role === "sidetrack_window") {
+            return "Окно sidetrack";
+          }
+          if (role === "t1" || role === "t3") {
+            return role;
+          }
+          if (/^\d+_t[13]$/.test(role)) {
+            return `Пласт ${role.slice(0, -3)} · ${role.slice(-2)}`;
+          }
+          return role || "Точка";
+        }
+
+        function selectedEditHandleFocus(index) {
+          const handle = editHandles[index];
+          if (!handle || !Number.isInteger(handle.wellIndex)) {
+            return;
+          }
+          const wellIndex = handle.wellIndex;
+          if (fitCameraToEditWellTargets(wellIndex)) {
+            requestRender();
+            return;
+          }
+          const well = editWells[wellIndex] || {};
+          const bounds = focusTargets[`well::${String(well.name || "")}`];
+          if (bounds) {
+            fitCameraToRawBounds(bounds);
+          }
+          requestRender();
+        }
+
+        function setSelectedEditHandleIndex(index, options) {
+          const nextIndex = Number(index);
+          const handle = Number.isInteger(nextIndex) ? editHandles[nextIndex] : null;
+          if (!handle || !Number.isInteger(handle.wellIndex)) {
+            return false;
+          }
+          selectedEditPadIndex = null;
+          selectedEditWellIndex = handle.wellIndex;
+          selectedEditWellIndices = new Set([handle.wellIndex]);
+          selectedEditHandleIndex = nextIndex;
+          syncEditVisibility();
+          syncEditToolboxState();
+          if (options && options.focus) {
+            selectedEditHandleFocus(nextIndex);
+          }
+          requestRender();
+          return true;
+        }
+
+        function editPointListMatch(handle, filter) {
+          const entry = editPointEntryForHandle(handle);
+          const text = [
+            handle && handle.pointLabel,
+            handle && handle.pointType,
+            handle && handle.pointRole,
+            entry && entry.label,
+            Number.isFinite(editPointMd(entry)) ? editPointMd(entry).toFixed(2) : "",
+          ].join(" ").toLowerCase();
+          return !filter || text.includes(filter);
+        }
+
+        function renderEditPointList() {
+          if (!editPointList) {
+            return;
+          }
+          const filter = String((editPointFilter && editPointFilter.value) || "")
+            .trim().toLowerCase();
+          const listKey = `${selectedEditWellIndex}|${filter}|${selectedEditHandleIndex}|${selectedEditPadIndex}`;
+          if (listKey === editInspectorListKey) {
+            return;
+          }
+          editInspectorListKey = listKey;
+          editPointList.replaceChildren();
+          if (Number.isInteger(selectedEditPadIndex) || !Number.isInteger(selectedEditWellIndex)) {
+            return;
+          }
+          const handles = editHandles.filter(
+            (handle) => handle && handle.wellIndex === selectedEditWellIndex && editPointListMatch(handle, filter),
+          );
+          let group = "";
+          handles.forEach((handle) => {
+            const groupTitle = editPointRoleTitle(handle).startsWith("Пласт")
+              ? "ЗБС / пласты"
+              : handle.pointRole === "sidetrack_window" ? "Sidetrack" : "Точки целей";
+            if (group !== groupTitle) {
+              group = groupTitle;
+              const groupNode = document.createElement("div");
+              groupNode.className = "edit-point-list-group";
+              groupNode.textContent = groupTitle;
+              editPointList.appendChild(groupNode);
+            }
+            const entry = editPointEntryForHandle(handle);
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = "edit-point-list-item";
+            button.classList.toggle(handle === selectedEditHandle(), "is-active");
+            const label = document.createElement("span");
+            label.textContent = String(
+              (entry && entry.label) || handle.pointLabel || handle.pointRole || `P${handle.pointIndex + 1}`,
+            );
+            const meta = document.createElement("span");
+            meta.className = "edit-point-list-meta";
+            const md = editPointMd(entry);
+            meta.textContent = Number.isFinite(md) ? `MD ${md.toFixed(1)} м` : editPointRoleTitle(handle);
+            button.append(label, meta);
+            button.addEventListener("click", () => {
+              setSelectedEditHandleIndex(editHandles.indexOf(handle), { focus: true });
+            });
+            editPointList.appendChild(button);
+          });
+          if (handles.length === 0) {
+            const empty = document.createElement("div");
+            empty.className = "edit-inspector-note";
+            empty.textContent = filter ? "Точки не найдены" : "Нет редактируемых точек";
+            editPointList.appendChild(empty);
+          }
+        }
+
+        function syncEditInspector() {
+          if (!editInspector) {
+            return;
+          }
+          editInspector.classList.toggle("is-visible", editModeActive);
+          if (!editModeActive) {
+            return;
+          }
+          const padSelected = isValidEditPadIndex(selectedEditPadIndex);
+          const handle = padSelected ? null : selectedEditHandle();
+          const well = Number.isInteger(selectedEditWellIndex) ? editWells[selectedEditWellIndex] || {} : {};
+          const entry = editPointEntryForHandle(handle);
+          if (editSelectionCount) {
+            editSelectionCount.textContent = padSelected ? "куст" : `${selectedEditWellIndices.size || 0} скв.`;
+          }
+          if (editInspectorSelection) {
+            editInspectorSelection.textContent = padSelected
+              ? String((editPads[selectedEditPadIndex] || {}).title || "Выбранный куст")
+              : String(well.name || "Выберите скважину");
+          }
+          if (editPointEditor) {
+            editPointEditor.style.display = padSelected || !handle ? "none" : "flex";
+          }
+          if (editPadSummary) {
+            editPadSummary.style.display = padSelected ? "flex" : "none";
+          }
+          if (editPointList) {
+            editPointList.style.display = padSelected ? "none" : "flex";
+          }
+          if (editInspectorTitle) {
+            editInspectorTitle.textContent = padSelected ? "Редактирование куста" : "Редактирование точек";
+          }
+          if (handle && entry) {
+            const point = copyEditPoint(entry.position);
+            if (editPointEditorTitle) editPointEditorTitle.textContent = String(entry.label || handle.pointRole || "Точка");
+            if (editPointEditorMeta) {
+              const md = editPointMd(entry);
+              editPointEditorMeta.textContent = `${editPointRoleTitle(handle)} · ${Number.isFinite(md) ? `MD ${md.toFixed(2)} м` : "MD не задан"}`;
+            }
+            [editCoordinateX, editCoordinateY, editCoordinateZ].forEach((field, index) => {
+              if (field && document.activeElement !== field) field.value = Number(point[index]).toFixed(3);
+            });
+            if (editZNote) {
+              const scale = Number(worldAxisZScaleSlider && worldAxisZScaleSlider.value) || 1;
+              editZNote.textContent = `+Z — глубже, −Z — мельче. Визуальный масштаб Z: ${scale.toFixed(2)}×, реальные координаты не меняются.`;
+            }
+            const sidetrack = handle.pointRole === "sidetrack_window" && entry.sidetrackWindow;
+            if (editSidetrackEditor) editSidetrackEditor.style.display = sidetrack ? "flex" : "none";
+            if (sidetrack) {
+              if (editSidetrackParent) editSidetrackParent.textContent = `Родитель: ${sidetrack.parentName || "не задан"} · привязка к parent path`;
+              if (editSidetrackMd && document.activeElement !== editSidetrackMd) editSidetrackMd.value = Number(sidetrack.valueM || 0).toFixed(2);
+              if (editSidetrackTvd) editSidetrackTvd.value = Number(point[2]).toFixed(2);
+              if (editSidetrackRange) editSidetrackRange.textContent = `Диапазон MD: ${sidetrack.parentPoints.length > 1 ? `${sidetrack.parentPoints[0][3].toFixed(1)}–${sidetrack.parentPoints[sidetrack.parentPoints.length - 1][3].toFixed(1)} м` : "не задан"}`;
+            }
+          }
+          renderEditPointList();
+          if (editPreviewStatusText) {
+            const dirty = editDirtyFlags.some(Boolean) || editPadDirtyFlags.some(Boolean);
+            editPreviewStatusText.textContent = dirty
+              ? "Предварительная геометрия. После сохранения требуется пересчёт; anti-collision для изменённых целей устарел."
+              : "Расчётная геометрия актуальна.";
+          }
+          if (padSelected) {
+            syncEditPadSummary();
+          }
         }
 
         function toggleSelectedEditHandleRole() {
@@ -69040,6 +69763,44 @@ class FastReplan {
           return currentPoints.some((point, pointIndex) =>
             !pointsNearlyEqual(point, originalPoints[pointIndex]),
           );
+        }
+
+        function cloneEditPadState(padIndex) {
+          return {
+            anchor: copyEditPoint(editPadCurrentAnchors[padIndex] || [0, 0, 0]),
+            points: cloneEditPadSurfacePoints(padIndex),
+            ndsAzimuthDeg: normalizeAzimuthDeg(editPadCurrentNds[padIndex] || 0),
+          };
+        }
+
+        function editPadStatesEqual(left, right) {
+          return Boolean(left && right) &&
+            pointsNearlyEqual(left.anchor, right.anchor) &&
+            Number(Math.abs(signedAzimuthDeltaDeg(left.ndsAzimuthDeg, right.ndsAzimuthDeg))) <= 0.05 &&
+            Array.isArray(left.points) && Array.isArray(right.points) &&
+            left.points.length === right.points.length &&
+            left.points.every((point, index) => pointsNearlyEqual(point, right.points[index]));
+        }
+
+        function pushEditPadUndoState(padIndex, previousState) {
+          if (!isValidEditPadIndex(padIndex) || !previousState) {
+            return;
+          }
+          const currentState = cloneEditPadState(padIndex);
+          if (editPadStatesEqual(previousState, currentState)) {
+            return;
+          }
+          const stack = editPadUndoStacks[padIndex];
+          stack.push({
+            anchor: copyEditPoint(previousState.anchor),
+            points: (previousState.points || []).map(copyEditPoint),
+            ndsAzimuthDeg: normalizeAzimuthDeg(previousState.ndsAzimuthDeg || 0),
+          });
+          if (stack.length > 60) {
+            stack.shift();
+          }
+          editPadRedoStacks[padIndex] = [];
+          syncEditToolboxState();
         }
 
         function syncEditPadMarkerHover(marker) {
@@ -70098,18 +70859,53 @@ class FastReplan {
           return [];
         }
 
-        function applyPairDeltaFromState(wellIndex, baseState, delta) {
+        function pointEntryPairKey(entry) {
+          const label = String((entry && (entry.label || entry.pointType)) || "").trim();
+          const match = label.match(/^(.*)_(?:t1|t3)$/i);
+          return match ? String(match[1]).trim().toLowerCase() : "";
+        }
+
+        function applyPairDeltaFromState(wellIndex, baseState, delta, sourceEntry) {
           if (!baseState) {
             return false;
           }
           if (Array.isArray(baseState.points) && baseState.points.length > 0) {
+            const sourcePairKey = pointEntryPairKey(sourceEntry);
             const nextPoints = copyEditPointEntries(baseState.points).map((entry) => ({
               index: entry.index,
               label: entry.label,
               pointType: entry.pointType,
-              position: editEntryMovesWithPairScope(entry)
+              position: editEntryMovesWithPairScope(entry) &&
+                (!sourcePairKey || pointEntryPairKey(entry) === sourcePairKey)
                 ? addDeltaToPoint(entry.position, delta)
                 : copyEditPoint(entry.position),
+              sidetrackWindow: entry.sidetrackWindow || null,
+            }));
+            updateWellEditPoints(wellIndex, nextPoints);
+            return true;
+          }
+          updateWellEditTargets(
+            wellIndex,
+            addDeltaToPoint(baseState.t1, delta),
+            addDeltaToPoint(baseState.t3, delta),
+          );
+          return true;
+        }
+
+        function applyAllPointDeltaFromState(wellIndex, baseState, delta, startIndex) {
+          if (!baseState) {
+            return false;
+          }
+          const fromIndex = Math.max(Number(startIndex) || 0, 0);
+          if (Array.isArray(baseState.points) && baseState.points.length > 0) {
+            const nextPoints = copyEditPointEntries(baseState.points).map((entry, index) => ({
+              index: entry.index,
+              label: entry.label,
+              pointType: entry.pointType,
+              position:
+                index >= fromIndex && !isSidetrackWindowEntry(entry)
+                  ? addDeltaToPoint(entry.position, delta)
+                  : copyEditPoint(entry.position),
               sidetrackWindow: entry.sidetrackWindow || null,
             }));
             updateWellEditPoints(wellIndex, nextPoints);
@@ -70175,14 +70971,16 @@ class FastReplan {
           const normalizedRole = String(pointRole || "");
           const normalizedScope = String(moveScope || "");
           if (
+            normalizedScope === "selected" &&
+            selectedEditWellIndices.has(primaryWellIndex)
+          ) {
+            return selectedEditWellIndexArray();
+          }
+          if (
             selectedEditWellIndices.size <= 1 ||
             !selectedEditWellIndices.has(primaryWellIndex) ||
             (normalizedRole !== "t1" && normalizedRole !== "t3") ||
-            (
-              normalizedScope !== "pair" &&
-              normalizedRole !== "t1" &&
-              normalizedRole !== "t3"
-            )
+            normalizedScope !== "pair"
           ) {
             return [primaryWellIndex];
           }
@@ -70207,9 +71005,20 @@ class FastReplan {
             const usePairScope =
               normalizedScope === "pair" &&
               (pointRole === "t1" || pointRole === "t3");
+            const useAllScope = normalizedScope === "well" || normalizedScope === "after";
+            const sourceEntry = Array.isArray(baseState.points)
+              ? baseState.points[Number(primaryHandle.pointIndex)]
+              : null;
             const applied =
               usePairScope
-                ? applyPairDeltaFromState(wellIndex, baseState, delta)
+                ? applyPairDeltaFromState(wellIndex, baseState, delta, sourceEntry)
+                : useAllScope
+                  ? applyAllPointDeltaFromState(
+                      wellIndex,
+                      baseState,
+                      delta,
+                      normalizedScope === "after" ? primaryHandle.pointIndex : 0,
+                    )
                 : applyPointDeltaFromState(
                     wellIndex,
                     baseState,
@@ -70236,6 +71045,140 @@ class FastReplan {
           requestRender();
         }
 
+        function finiteInspectorNumber(field) {
+          const value = Number(field && field.value);
+          return Number.isFinite(value) ? value : null;
+        }
+
+        function applyExactSelectedPointFromInspector() {
+          const handle = selectedEditHandle();
+          const wellIndex = selectedEditWellIndex;
+          if (!editModeActive || Number.isInteger(selectedEditPadIndex) || !handle || !Number.isInteger(wellIndex)) {
+            return;
+          }
+          const x = finiteInspectorNumber(editCoordinateX);
+          const y = finiteInspectorNumber(editCoordinateY);
+          const z = finiteInspectorNumber(editCoordinateZ);
+          if (x === null || y === null || z === null) {
+            return;
+          }
+          const before = cloneEditState(wellIndex);
+          if (editWellHasExplicitPoints(wellIndex)) {
+            const nextPoints = copyEditPointEntries(before.points);
+            if (!nextPoints[handle.pointIndex]) {
+              return;
+            }
+            nextPoints[handle.pointIndex].position = [x, y, z];
+            updateWellEditPoints(wellIndex, nextPoints);
+          } else if (handle.pointRole === "t1" || handle.pointRole === "t3") {
+            const point = [x, y, z];
+            updateWellEditTargets(
+              wellIndex,
+              handle.pointRole === "t1" ? point : before.t1,
+              handle.pointRole === "t3" ? point : before.t3,
+            );
+          } else {
+            return;
+          }
+          pushEditUndoState(wellIndex, before);
+          finalizeEditUpdates([wellIndex]);
+        }
+
+        function parentPositionAtMd(parentPoints, requestedMd) {
+          if (!Array.isArray(parentPoints) || parentPoints.length === 0) {
+            return null;
+          }
+          const first = parentPoints[0];
+          const last = parentPoints[parentPoints.length - 1];
+          const md = Math.max(Number(first[3]) || 0, Math.min(Number(last[3]) || 0, Number(requestedMd) || 0));
+          for (let index = 0; index < parentPoints.length - 1; index += 1) {
+            const start = parentPoints[index];
+            const end = parentPoints[index + 1];
+            const startMd = Number(start[3]) || 0;
+            const endMd = Number(end[3]) || startMd;
+            if (md <= endMd || index === parentPoints.length - 2) {
+              const ratio = Math.abs(endMd - startMd) > EDIT_DELTA_EPS_M
+                ? (md - startMd) / (endMd - startMd) : 0;
+              const t = Math.max(0, Math.min(1, ratio));
+              return {
+                position: [
+                  start[0] + (end[0] - start[0]) * t,
+                  start[1] + (end[1] - start[1]) * t,
+                  start[2] + (end[2] - start[2]) * t,
+                ],
+                mdM: md,
+              };
+            }
+          }
+          return { position: [first[0], first[1], first[2]], mdM: md };
+        }
+
+        function applySidetrackFromInspector() {
+          const handle = selectedEditHandle();
+          const wellIndex = selectedEditWellIndex;
+          const entry = editPointEntryForHandle(handle);
+          const requestedMd = finiteInspectorNumber(editSidetrackMd);
+          if (
+            !editModeActive ||
+            !handle ||
+            handle.pointRole !== "sidetrack_window" ||
+            !entry ||
+            !entry.sidetrackWindow ||
+            requestedMd === null ||
+            !Number.isInteger(wellIndex)
+          ) {
+            return;
+          }
+          const parent = parentPositionAtMd(entry.sidetrackWindow.parentPoints, requestedMd);
+          if (!parent) {
+            return;
+          }
+          const before = cloneEditState(wellIndex);
+          const nextPoints = copyEditPointEntries(before.points);
+          const nextEntry = nextPoints[handle.pointIndex];
+          if (!nextEntry) {
+            return;
+          }
+          nextEntry.position = parent.position;
+          nextEntry.sidetrackWindow = Object.assign({}, entry.sidetrackWindow, {
+            kind: "md",
+            valueM: parent.mdM,
+          });
+          updateWellEditPoints(wellIndex, nextPoints);
+          pushEditUndoState(wellIndex, before);
+          finalizeEditUpdates([wellIndex]);
+        }
+
+        function applySelectedDeltaFromInspector() {
+          const handle = selectedEditHandle();
+          const wellIndex = selectedEditWellIndex;
+          const delta = [
+            finiteInspectorNumber(editDeltaX),
+            finiteInspectorNumber(editDeltaY),
+            finiteInspectorNumber(editDeltaZ),
+          ];
+          if (
+            !editModeActive ||
+            Number.isInteger(selectedEditPadIndex) ||
+            !handle ||
+            !Number.isInteger(wellIndex) ||
+            delta.some((value) => value === null)
+          ) {
+            return;
+          }
+          const affected = selectedEditWellIndexArray();
+          const beforeStates = collectEditStates(affected);
+          const appliedIndices = applySynchronizedDeltaFromStates(
+            beforeStates,
+            wellIndex,
+            handle,
+            delta,
+            editMoveScope,
+          );
+          pushEditUndoStates(beforeStates);
+          finalizeEditUpdates(appliedIndices);
+        }
+
         function syncEditToolboxState() {
           if (!editUndoBtn || !editRedoBtn || !editResetBtn || !editPointSelector) {
             return;
@@ -70259,16 +71202,16 @@ class FastReplan {
             );
           editUndoBtn.disabled =
             !editModeActive ||
-            selectedPad !== null ||
             !hasSelection ||
-            !Array.isArray(editUndoStacks[selectedIndex]) ||
-            editUndoStacks[selectedIndex].length === 0;
+            (selectedPad !== null
+              ? !Array.isArray(editPadUndoStacks[selectedPad]) || editPadUndoStacks[selectedPad].length === 0
+              : !Array.isArray(editUndoStacks[selectedIndex]) || editUndoStacks[selectedIndex].length === 0);
           editRedoBtn.disabled =
             !editModeActive ||
-            selectedPad !== null ||
             !hasSelection ||
-            !Array.isArray(editRedoStacks[selectedIndex]) ||
-            editRedoStacks[selectedIndex].length === 0;
+            (selectedPad !== null
+              ? !Array.isArray(editPadRedoStacks[selectedPad]) || editPadRedoStacks[selectedPad].length === 0
+              : !Array.isArray(editRedoStacks[selectedIndex]) || editRedoStacks[selectedIndex].length === 0);
           editResetBtn.disabled =
             !editModeActive ||
             !hasSelection ||
@@ -70308,10 +71251,21 @@ class FastReplan {
               );
           });
           syncEditPadSummary();
+          syncEditInspector();
         }
 
         function undoSelectedEdit() {
           if (Number.isInteger(selectedEditPadIndex)) {
+            const padIndex = selectedEditPadIndex;
+            if (!Array.isArray(editPadUndoStacks[padIndex]) || editPadUndoStacks[padIndex].length === 0) {
+              return;
+            }
+            const previousState = editPadUndoStacks[padIndex].pop();
+            editPadRedoStacks[padIndex].push(cloneEditPadState(padIndex));
+            applyEditPadState(padIndex, previousState.anchor, previousState.points, previousState.ndsAzimuthDeg);
+            syncEditVisibility();
+            showEditFeedback();
+            requestRender();
             return;
           }
           const wellIndex = selectedEditWellIndex;
@@ -70347,6 +71301,16 @@ class FastReplan {
 
         function redoSelectedEdit() {
           if (Number.isInteger(selectedEditPadIndex)) {
+            const padIndex = selectedEditPadIndex;
+            if (!Array.isArray(editPadRedoStacks[padIndex]) || editPadRedoStacks[padIndex].length === 0) {
+              return;
+            }
+            const nextState = editPadRedoStacks[padIndex].pop();
+            editPadUndoStacks[padIndex].push(cloneEditPadState(padIndex));
+            applyEditPadState(padIndex, nextState.anchor, nextState.points, nextState.ndsAzimuthDeg);
+            syncEditVisibility();
+            showEditFeedback();
+            requestRender();
             return;
           }
           const wellIndex = selectedEditWellIndex;
@@ -70382,10 +71346,13 @@ class FastReplan {
 
         function resetSelectedEdit() {
           if (Number.isInteger(selectedEditPadIndex)) {
-            if (!editPadDirtyFlags[selectedEditPadIndex]) {
+            const padIndex = selectedEditPadIndex;
+            if (!editPadDirtyFlags[padIndex]) {
               return;
             }
-            resetEditPad(selectedEditPadIndex);
+            editPadUndoStacks[padIndex].push(cloneEditPadState(padIndex));
+            editPadRedoStacks[padIndex] = [];
+            resetEditPad(padIndex);
             resetEditSaveButtonState();
             syncEditVisibility();
             showEditFeedback();
@@ -70593,6 +71560,8 @@ class FastReplan {
             editPadOriginalNds.push(initialNds);
             editPadCurrentNds.push(initialNds);
             editPadDirtyFlags.push(false);
+            editPadUndoStacks.push([]);
+            editPadRedoStacks.push([]);
             const firstPointMeta = pointEntries[0] || {};
             const wellName = String(firstPointMeta.well_name || "");
             const mappedWellIndex = editWellIndexByName.get(wellName);
@@ -71038,7 +72007,8 @@ class FastReplan {
         }
 
         function setEditMoveScope(scope) {
-          if (scope !== "point" && scope !== "pair") {
+          const validScopes = new Set(["point", "pair", "well", "after", "selected"]);
+          if (!validScopes.has(String(scope || ""))) {
             return;
           }
           editMoveScope = scope;
@@ -71695,6 +72665,7 @@ class FastReplan {
             return false;
           }
           editPadRotateIndex = padIndex;
+          editPadRotateHistoryStartState = cloneEditPadState(padIndex);
           editPadRotateStartNdsDeg = normalizeAzimuthDeg(
             editPadCurrentNds[padIndex] ?? marker.ndsAzimuthDeg,
           );
@@ -71768,6 +72739,9 @@ class FastReplan {
           if (!Number.isInteger(editPadRotateIndex)) {
             return false;
           }
+          const padIndex = editPadRotateIndex;
+          pushEditPadUndoState(padIndex, editPadRotateHistoryStartState);
+          editPadRotateHistoryStartState = null;
           controls.enabled = true;
           editPadRotateIndex = null;
           editPadRotateStartAngle = 0.0;
@@ -72091,6 +73065,7 @@ class FastReplan {
               interactionActive = true;
               hideTooltip();
               editPadDragMarker = marker;
+              editPadDragHistoryStartState = cloneEditPadState(marker.padIndex);
               editDragPlane = "xy";
               editDragMoveScope = "pair";
               editDragPlaneZ = marker.mesh.position.z;
@@ -72302,8 +73277,11 @@ class FastReplan {
             return;
           }
           if (editPadDragMarker) {
+            const padIndex = editPadDragMarker.padIndex;
+            pushEditPadUndoState(padIndex, editPadDragHistoryStartState);
             controls.enabled = true;
             editPadDragMarker = null;
+            editPadDragHistoryStartState = null;
             editDragPlane = null;
             editDragMoveScope = "point";
             editDragPlaneZ = 0.0;
@@ -72895,6 +73873,21 @@ class FastReplan {
           editRedoBtn.addEventListener("click", redoSelectedEdit);
           editResetBtn.addEventListener("click", resetSelectedEdit);
           editSaveBtn.addEventListener("click", onEditSave);
+          if (editPointFilter) {
+            editPointFilter.addEventListener("input", () => {
+              editInspectorListKey = "";
+              syncEditInspector();
+            });
+          }
+          if (editApplyCoordinates) {
+            editApplyCoordinates.addEventListener("click", applyExactSelectedPointFromInspector);
+          }
+          if (editApplyDelta) {
+            editApplyDelta.addEventListener("click", applySelectedDeltaFromInspector);
+          }
+          if (editApplySidetrack) {
+            editApplySidetrack.addEventListener("click", applySidetrackFromInspector);
+          }
           renderer.domElement.addEventListener("pointerdown", onEditPointerDown, true);
           renderer.domElement.addEventListener("pointermove", onEditPointerMove, true);
           renderer.domElement.addEventListener("pointerup", onEditPointerUp, true);
@@ -83492,14 +84485,13 @@ def _explicit_multi_horizontal_labels_are_valid(labels: tuple[str, ...]) -> bool
     return normalized == expected
 
 ===END_FILE===
-===BEGIN_FILE===	scripts/check_streamlit_pages.py	10706
+===BEGIN_FILE===	scripts/check_streamlit_pages.py	11554
 #!/usr/bin/env python3
 from __future__ import annotations
 
 from pathlib import Path
 import socket
 import subprocess
-import sys
 import time
 import urllib.error
 import urllib.request
@@ -83549,7 +84541,9 @@ def _expected_calc_defaults() -> dict[str, float]:
         "Целевой INC на t1, deg": float(cfg.entry_inc_target_deg),
         "Допуск INC на t1, deg": float(cfg.entry_inc_tolerance_deg),
         "Макс INC по стволу, deg": float(cfg.max_inc_deg),
-        "Макс ПИ BUILD, deg/10m": float(dls_to_pi(cfg.dls_build_max_deg_per_30m)),
+        "Макс ПИ BUILD 1/2, deg/10m": float(
+            dls_to_pi(cfg.dls_build_max_deg_per_30m)
+        ),
         "Мин VERTICAL до KOP, м": float(cfg.kop_min_vertical_m),
         "Макс итоговая MD (постпроверка), м": float(cfg.max_total_md_postcheck_m),
         "Макс рестартов решателя": float(cfg.turn_solver_max_restarts),
@@ -83599,6 +84593,7 @@ def _check_calc_defaults_on_pages(project_root: Path) -> list[str]:
     # PTC page only renders the calc-param form when records are loaded,
     # so we must provide a real welltrack source before clicking import.
     ptc_at = AppTest.from_file(str(project_root / "pages" / "01_trajectory_constructor.py"))
+    ptc_at.session_state["wt_source_format"] = "WELLTRACK"
     ptc_at.session_state["wt_source_mode"] = "Файл по пути"
     ptc_at.session_state["wt_source_path"] = "tests/test_data/WELLTRACKS.INC"
     ptc_at.run()
@@ -83607,6 +84602,14 @@ def _check_calc_defaults_on_pages(project_root: Path) -> list[str]:
         errors.append("pages/01_trajectory_constructor.py: import button not found.")
         return errors
     import_buttons[0].click()
+    ptc_at.run()
+    calc_panel_buttons = [button for button in ptc_at.button if button.label == "Показать"]
+    if not calc_panel_buttons:
+        errors.append(
+            "pages/01_trajectory_constructor.py: calculation-parameters toggle not found after import."
+        )
+        return errors
+    calc_panel_buttons[0].click()
     ptc_at.run()
     for label, expected_value in expected.items():
         actual = _find_number_value(ptc_at, label)
@@ -83636,6 +84639,7 @@ def _check_calc_defaults_on_pages(project_root: Path) -> list[str]:
     ptc_legacy = AppTest.from_file(
         str(project_root / "pages" / "01_trajectory_constructor.py")
     )
+    ptc_legacy.session_state["wt_source_format"] = "WELLTRACK"
     ptc_legacy.session_state["wt_source_mode"] = "Файл по пути"
     ptc_legacy.session_state["wt_source_path"] = "tests/test_data/WELLTRACKS.INC"
     calc_defaults = calc_param_defaults()
@@ -83655,6 +84659,16 @@ def _check_calc_defaults_on_pages(project_root: Path) -> list[str]:
         )
         return errors
     legacy_import_buttons[0].click()
+    ptc_legacy.run()
+    legacy_calc_panel_buttons = [
+        button for button in ptc_legacy.button if button.label == "Показать"
+    ]
+    if not legacy_calc_panel_buttons:
+        errors.append(
+            "pages/01_trajectory_constructor.py: calculation-parameters toggle not found (legacy check)."
+        )
+        return errors
+    legacy_calc_panel_buttons[0].click()
     ptc_legacy.run()
     for label, expected_value in expected.items():
         actual = _find_number_value(ptc_legacy, label)
