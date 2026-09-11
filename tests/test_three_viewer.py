@@ -767,6 +767,25 @@ def test_viewer_template_uses_single_scene_handle_for_pad_edits() -> None:
     )
 
 
+def test_viewer_template_uses_one_draggable_edit_panel_for_tools_and_inspector() -> None:
+    html = three_viewer._viewer_template_with_libraries()
+
+    toolbox_start = html.index('<div id="edit-toolbox">')
+    inspector_start = html.index('<div id="edit-inspector">', toolbox_start)
+    toolbox_end = html.index('<button id="edit-save-btn"', inspector_start)
+
+    assert toolbox_start < inspector_start < toolbox_end
+    inspector_css_start = html.index('#edit-inspector {')
+    inspector_css_end = html.index('#edit-inspector.is-visible', inspector_css_start)
+    assert 'position: static;' in html[inspector_css_start:inspector_css_end]
+    assert 'left: 402px;' not in html[inspector_css_start:inspector_css_end]
+    toolbox_css_start = html.index('#edit-toolbox {')
+    toolbox_css_end = html.index('#edit-toolbox.is-visible', toolbox_css_start)
+    assert 'max-height: calc(100% - 72px);' in html[toolbox_css_start:toolbox_css_end]
+    assert 'function initEditToolboxDrag()' in html
+    assert 'header.addEventListener("pointerdown"' in html
+
+
 def test_viewer_template_initializes_pad_handles_on_initial_load() -> None:
     html = three_viewer._viewer_template_with_libraries()
 

@@ -7026,7 +7026,7 @@ class FastReplan {
 </html>
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/three_viewer_assets/templates/viewer_template.html	475585
+===BEGIN_FILE===	pywp/three_viewer_assets/templates/viewer_template.html	479558
 <!doctype html>
 <html lang="en">
   <head>
@@ -7883,8 +7883,9 @@ class FastReplan {
         position: absolute;
         top: 52px;
         left: 156px;
-        width: 234px;
-        max-width: calc(100% - 20px);
+        width: 352px;
+        max-width: min(352px, calc(100% - 20px));
+        max-height: calc(100% - 72px);
         z-index: 6;
         background: rgba(255,255,255,0.97);
         border-radius: 12px;
@@ -7922,6 +7923,9 @@ class FastReplan {
         flex-direction: column;
         gap: 9px;
         padding: 9px 10px 10px;
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow: auto;
       }
 
       .edit-toolbox-section {
@@ -8078,26 +8082,22 @@ class FastReplan {
 
       #edit-inspector {
         display: none;
-        position: absolute;
-        top: 52px;
-        left: 402px;
-        width: 326px;
-        max-width: min(326px, calc(100% - 20px));
-        max-height: calc(100% - 72px);
+        position: static;
+        width: auto;
+        max-width: none;
+        max-height: min(46vh, 410px);
         overflow: auto;
-        z-index: 6;
-        padding: 10px;
+        border-top: 1px solid rgba(15,23,42,0.08);
+        padding: 8px 10px 10px;
         box-sizing: border-box;
-        border-radius: 12px;
-        background: rgba(255,255,255,0.97);
-        box-shadow: 0 10px 28px rgba(15,23,42,0.14);
+        background: rgba(248,250,252,0.62);
         color: #334155;
       }
 
       #edit-inspector.is-visible {
         display: flex;
         flex-direction: column;
-        gap: 9px;
+        gap: 6px;
       }
 
       .edit-inspector-title {
@@ -8120,7 +8120,7 @@ class FastReplan {
       .edit-inspector-input,
       .edit-inspector-select {
         width: 100%;
-        min-height: 28px;
+        min-height: 25px;
         box-sizing: border-box;
         border: 1px solid rgba(100,116,139,0.28);
         border-radius: 7px;
@@ -8128,7 +8128,7 @@ class FastReplan {
         color: #0f172a;
         font: inherit;
         font-size: 11px;
-        padding: 5px 7px;
+        padding: 3px 6px;
       }
 
       .edit-inspector-search:focus,
@@ -8142,7 +8142,7 @@ class FastReplan {
         display: flex;
         flex-direction: column;
         gap: 3px;
-        max-height: 178px;
+        max-height: 122px;
         overflow: auto;
         padding: 2px;
         border: 1px solid rgba(148,163,184,0.22);
@@ -8196,8 +8196,8 @@ class FastReplan {
       .edit-inspector-section {
         display: flex;
         flex-direction: column;
-        gap: 5px;
-        padding-top: 7px;
+        gap: 4px;
+        padding-top: 6px;
         border-top: 1px solid rgba(148,163,184,0.2);
       }
 
@@ -8286,9 +8286,21 @@ class FastReplan {
         grid-template-columns: minmax(0, 1fr) auto auto;
         gap: 5px;
         align-items: center;
+        width: 100%;
+        border: 1px solid transparent;
+        border-radius: 5px;
+        background: transparent;
+        cursor: pointer;
         color: #475569;
         font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
         font-size: 9px;
+        padding: 3px 4px;
+        text-align: left;
+      }
+
+      .edit-pad-well-row:hover {
+        border-color: rgba(37,99,235,0.20);
+        background: rgba(37,99,235,0.07);
       }
 
       .edit-pad-well-row strong {
@@ -8298,11 +8310,12 @@ class FastReplan {
       }
 
       @media (max-width: 840px) {
-        #edit-inspector {
+        #edit-toolbox {
+          width: min(352px, calc(100% - 20px));
           left: 10px;
           top: auto;
           bottom: 54px;
-          max-height: min(54vh, 520px);
+          max-height: min(70vh, 560px);
         }
       }
 
@@ -9080,8 +9093,6 @@ class FastReplan {
               <button id="edit-reset-btn" class="edit-tool-btn is-reset" type="button" title="Вернуть выбранную скважину к исходным точкам">Сброс</button>
             </div>
           </div>
-        </div>
-      </div>
       <div id="edit-inspector">
         <div class="edit-inspector-title">
           <span id="edit-inspector-title">Редактирование</span>
@@ -9149,6 +9160,8 @@ class FastReplan {
           <span aria-hidden="true">●</span>
           <span id="edit-preview-status-text">Предварительный статус появится после выбора объекта.</span>
         </div>
+      </div>
+      </div>
       </div>
       <button id="edit-save-btn" type="button">Сохранить изменения</button>
       <div id="edit-warning-toast">
@@ -14683,6 +14696,7 @@ class FastReplan {
         let editWarningDismissed = false;
         let selectedEditHandleIndex = null;
         let editInspectorListKey = "";
+        let editPadSummaryListKey = "";
         let editBroadcastChannel = null;
         let editSavePendingTimeoutId = null;
         const EDIT_SAVE_DEFAULT_TEXT = "Сохранить изменения";
@@ -15572,6 +15586,19 @@ class FastReplan {
           );
         }
 
+        function sidetrackWindowsEqual(left, right) {
+          if (!left || !right) {
+            return !left && !right;
+          }
+          return (
+            String(left.kind || "md") === String(right.kind || "md") &&
+            Math.abs(
+              Number(left.valueM || 0) - Number(right.valueM || 0),
+            ) <= EDIT_DELTA_EPS_M &&
+            String(left.parentName || "") === String(right.parentName || "")
+          );
+        }
+
         function editStatesEqual(left, right) {
           const leftPoints = Array.isArray(left && left.points) ? left.points : [];
           const rightPoints = Array.isArray(right && right.points) ? right.points : [];
@@ -15579,9 +15606,13 @@ class FastReplan {
             if (leftPoints.length !== rightPoints.length) {
               return false;
             }
-            return leftPoints.every((entry, index) =>
-              pointsNearlyEqual(entry.position, rightPoints[index].position),
-            );
+            return leftPoints.every((entry, index) => {
+              const rightEntry = rightPoints[index];
+              return (
+                pointsNearlyEqual(entry.position, rightEntry.position) &&
+                sidetrackWindowsEqual(entry.sidetrackWindow, rightEntry.sidetrackWindow)
+              );
+            });
           }
           return (
             Boolean(left) &&
@@ -15831,6 +15862,7 @@ class FastReplan {
           const pad = selectedEditPad();
           if (!editModeActive || !pad || !isValidEditPadIndex(padIndex)) {
             editPadSummary.classList.remove("is-visible");
+            editPadSummaryListKey = "";
             return;
           }
           const currentAnchor = editPadCurrentAnchors[padIndex] || [0, 0, 0];
@@ -15847,6 +15879,40 @@ class FastReplan {
           );
           editPadFinalX.textContent = formatCoordinateMeters(currentAnchor[0]);
           editPadFinalY.textContent = formatCoordinateMeters(currentAnchor[1]);
+          if (editPadFinalNds) {
+            editPadFinalNds.textContent = formatAzimuthDegrees(editPadCurrentNds[padIndex]);
+          }
+          if (editPadWellList) {
+            const assignments = Array.isArray(pad.surface_points) ? pad.surface_points : [];
+            const currentPoints = editPadCurrentPoints[padIndex] || [];
+            const listKey = `${padIndex}|${currentPoints.map((point) => point.map((value) => Number(value).toFixed(3)).join(",")).join(";")}|${assignments.length}`;
+            if (listKey !== editPadSummaryListKey) {
+              editPadWellList.replaceChildren();
+              assignments.forEach((assignment, index) => {
+                const originalPoint = copyEditPoint(assignment.position);
+                const currentPoint = copyEditPoint(currentPoints[index] || originalPoint);
+                const row = document.createElement("button");
+                row.type = "button";
+                row.className = "edit-pad-well-row";
+                row.title = "Выбрать устье для отдельного редактирования";
+                const name = document.createElement("strong");
+                name.textContent = `#${Number(assignment.slot_index) || index + 1} ${String(assignment.well_name || "Скважина")}`;
+                const dx = document.createElement("span");
+                dx.textContent = formatDeltaMeters(currentPoint[0] - originalPoint[0]);
+                const dy = document.createElement("span");
+                dy.textContent = formatDeltaMeters(currentPoint[1] - originalPoint[1]);
+                row.append(name, dx, dy);
+                const wellIndex = editWellIndexByName.get(String(assignment.well_name || ""));
+                if (isValidEditWellIndex(wellIndex)) {
+                  row.addEventListener("click", () => selectEditWell(wellIndex, { focus: true }));
+                } else {
+                  row.disabled = true;
+                }
+                editPadWellList.appendChild(row);
+              });
+              editPadSummaryListKey = listKey;
+            }
+          }
           editPadSummary.classList.add("is-visible");
         }
 
@@ -16326,7 +16392,7 @@ class FastReplan {
         }
 
         function updateEditDeltaGuide(handle) {
-          if (!handle || !handle.guide) {
+          if (!handle) {
             return;
           }
           const wellIndex = handle.wellIndex;
@@ -16366,11 +16432,14 @@ class FastReplan {
             wellIndex === selectedEditWellIndex &&
             (total > EDIT_DELTA_EPS_M ||
               Math.abs(sidetrackMdDelta) > EDIT_DELTA_EPS_M);
-          const guide = handle.guide;
           if (!selected) {
-            hideEditDeltaGuide(guide);
+            hideEditDeltaGuide(handle.guide);
             return;
           }
+          if (!handle.guide) {
+            handle.guide = createEditDeltaGuide(handle.pointType, handle.color);
+          }
+          const guide = handle.guide;
           const viaX = [current[0], original[1], original[2]];
           const viaY = [current[0], current[1], original[2]];
 
@@ -17378,7 +17447,8 @@ class FastReplan {
                 pointIndex: pointIndex,
                 dataPos: point.slice(),
                 sidetrackWindow: pointEntry.sidetrackWindow || null,
-                guide: createEditDeltaGuide(pointLabel, color),
+                color: color,
+                guide: null,
               });
             });
 
@@ -17574,6 +17644,14 @@ class FastReplan {
 
         function updateHandleScales() {
           editHandles.forEach((h, handleIndex) => {
+            if (
+              h && h.mesh && !h.mesh.visible &&
+              (!h.pickMesh || !h.pickMesh.visible) &&
+              (!h.previewMesh || !h.previewMesh.visible) &&
+              (!h.originalMesh || !h.originalMesh.visible)
+            ) {
+              return;
+            }
             const displayPosition = h.mesh ? h.mesh.position : displayPoint(h.dataPos);
             const selectedHandle =
               editModeActive &&
@@ -17696,13 +17774,17 @@ class FastReplan {
             editToolbox.style.top = `${newTop}px`;
           });
 
-          header.addEventListener("pointerup", function () {
+          const stopToolboxDrag = function (event) {
             dragging = false;
-          });
+            try {
+              if (event) {
+                header.releasePointerCapture(event.pointerId);
+              }
+            } catch (e) { /* ignore */ }
+          };
 
-          header.addEventListener("pointercancel", function () {
-            dragging = false;
-          });
+          header.addEventListener("pointerup", stopToolboxDrag);
+          header.addEventListener("pointercancel", stopToolboxDrag);
         }
 
         function syncEditVisibility() {
@@ -18122,7 +18204,11 @@ class FastReplan {
             default:
               return null;
           }
-          return direction.map((value) => value * EDIT_KEYBOARD_STEP_M);
+          const configuredStep = Number(editEditStep && editEditStep.value);
+          const step = Number.isFinite(configuredStep) && configuredStep > 0
+            ? configuredStep
+            : EDIT_KEYBOARD_STEP_M;
+          return direction.map((value) => value * step);
         }
 
         function shouldHandleEditKeyboardEvent(event) {
@@ -19519,6 +19605,7 @@ class FastReplan {
           editPadOriginalNds.length = 0;
           editPadCurrentNds.length = 0;
           editPadDirtyFlags.length = 0;
+          editPadSummaryListKey = "";
           editOriginalPoints.length = 0;
           editCurrentPoints.length = 0;
           editOriginalT1.length = 0;
