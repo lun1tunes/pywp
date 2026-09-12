@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 # Session state keys
 CRS_INPUT_SELECTED_KEY = "trajectory_input_crs_selected"
 CRS_INPUT_SELECTBOX_KEY = "trajectory_input_crs_selectbox"
+CRS_INPUT_MAIN_SELECTBOX_KEY = "trajectory_input_crs_main_selectbox"
 CRS_SELECTED_KEY = "trajectory_crs_selected"  # CSV target CRS, kept for compatibility
 CRS_SELECTBOX_KEY = "trajectory_crs_selectbox"
 CRS_AUTO_CONVERT_KEY = "trajectory_crs_auto_convert"
@@ -206,10 +207,6 @@ _DEFAULT_CRS_INDEX = next(
     (i for i, (_, c) in enumerate(CSV_CRS_OPTIONS) if c == DEFAULT_CSV_EXPORT_CRS),
     0,
 )
-_DEFAULT_INPUT_CRS_INDEX = next(
-    (i for i, (_, c) in enumerate(INPUT_CRS_OPTIONS) if c == DEFAULT_CRS),
-    0,
-)
 
 
 def _streamlit():
@@ -229,6 +226,79 @@ def _get_crs_index(
         if c == crs:
             return i
     return default_index
+
+
+def _input_crs_label_to_value(label: object) -> CoordinateSystem:
+    normalized_label = CRS_LABEL_ALIASES.get(str(label), str(label))
+    return next(
+        (
+            crs
+            for option_label, crs in INPUT_CRS_OPTIONS
+            if option_label == normalized_label
+        ),
+        DEFAULT_CRS,
+    )
+
+
+def _sync_input_crs_selectors(source_key: str) -> None:
+    """Keep the main-page and sidebar input CRS widgets on one selection."""
+    st = _streamlit()
+    selected_label = CRS_LABEL_ALIASES.get(
+        str(st.session_state.get(source_key, "")),
+        str(st.session_state.get(source_key, "")),
+    )
+    if selected_label not in INPUT_CRS_LABEL_BY_VALUE.values():
+        selected_label = INPUT_CRS_LABEL_BY_VALUE[DEFAULT_CRS]
+    st.session_state[CRS_INPUT_SELECTED_KEY] = _input_crs_label_to_value(
+        selected_label
+    )
+    other_key = (
+        CRS_INPUT_SELECTBOX_KEY
+        if source_key == CRS_INPUT_MAIN_SELECTBOX_KEY
+        else CRS_INPUT_MAIN_SELECTBOX_KEY
+    )
+    st.session_state[other_key] = selected_label
+
+
+def _prepare_input_crs_widget_state(
+    widget_key: str,
+    current_crs: CoordinateSystem,
+) -> None:
+    st = _streamlit()
+    # Both widgets are rendered with index=None. Their visible value must
+    # therefore be seeded from the canonical CRS before each widget is built;
+    # doing so avoids Streamlit's default-value/session-state duplication
+    # warning while keeping programmatic CRS changes synchronized as well.
+    st.session_state[widget_key] = INPUT_CRS_LABEL_BY_VALUE.get(
+        current_crs,
+        INPUT_CRS_LABEL_BY_VALUE[DEFAULT_CRS],
+    )
+
+
+def render_input_crs_section() -> CoordinateSystem:
+    """Render the compact main-page input CRS selector (section 0)."""
+    st = _streamlit()
+    current_input_crs = get_input_crs()
+    input_option_labels = [label for label, _ in INPUT_CRS_OPTIONS]
+    _prepare_input_crs_widget_state(
+        CRS_INPUT_MAIN_SELECTBOX_KEY,
+        current_input_crs,
+    )
+    selected_label = st.selectbox(
+        "Входная",
+        options=input_option_labels,
+        index=None,
+        key=CRS_INPUT_MAIN_SELECTBOX_KEY,
+        on_change=_sync_input_crs_selectors,
+        args=(CRS_INPUT_MAIN_SELECTBOX_KEY,),
+        help=(
+            "Система координат исходных X/Y. Используйте СК, в которой "
+            "задана ГМ/ГДМ модель."
+        ),
+    )
+    input_crs = _input_crs_label_to_value(selected_label)
+    st.session_state[CRS_INPUT_SELECTED_KEY] = input_crs
+    return input_crs
 
 
 def render_crs_sidebar() -> CoordinateSystem:
@@ -261,20 +331,17 @@ def render_crs_sidebar() -> CoordinateSystem:
             st.session_state[CRS_SELECTED_KEY] = DEFAULT_CSV_EXPORT_CRS
 
         input_option_labels = [label for label, _ in INPUT_CRS_OPTIONS]
-        previous_label = st.session_state.get(CRS_INPUT_SELECTBOX_KEY)
-        if previous_label in CRS_LABEL_ALIASES:
-            st.session_state[CRS_INPUT_SELECTBOX_KEY] = CRS_LABEL_ALIASES[previous_label]
-        if st.session_state.get(CRS_INPUT_SELECTBOX_KEY) not in input_option_labels:
-            st.session_state.pop(CRS_INPUT_SELECTBOX_KEY, None)
+        _prepare_input_crs_widget_state(
+            CRS_INPUT_SELECTBOX_KEY,
+            current_input_crs,
+        )
         selected_input_label = st.selectbox(
             "Входная",
             options=input_option_labels,
-            index=_get_crs_index(
-                current_input_crs,
-                INPUT_CRS_OPTIONS,
-                default_index=_DEFAULT_INPUT_CRS_INDEX,
-            ),
+            index=None,
             key=CRS_INPUT_SELECTBOX_KEY,
+            on_change=_sync_input_crs_selectors,
+            args=(CRS_INPUT_SELECTBOX_KEY,),
             help=(
                 "Система координат исходных X/Y. Расчёт и отображение ведутся в этих координатах. "
                 "СК-42 Зона N — полный зональный отсчёт; ГК_NN_42 — сокращённый, "
@@ -963,6 +1030,7 @@ def get_crs_display_suffix(crs: CoordinateSystem) -> str:
 
 __all__ = [
     "render_crs_sidebar",
+    "render_input_crs_section",
     "get_input_crs",
     "get_selected_crs",
     "should_auto_convert",

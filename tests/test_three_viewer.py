@@ -746,9 +746,10 @@ def test_viewer_template_uses_single_scene_handle_for_pad_edits() -> None:
     assert "OctahedronGeometry" not in pad_section
     assert "pointIndex: null," in html
     assert 'point: marker.pointLabel || "S",' in html
-    assert ".scene-label.edit-pad-handle-label" in html
-    assert ".scene-label.edit-pad-handle-label:hover" in html
-    assert ".scene-label.edit-pad-handle-label.is-dragging" in html
+    assert '"edit-delta-label"' in html
+    assert 'id="edit-points-controls"' in html
+    assert 'id="edit-active-point-controls"' in html
+    assert "is-pad-selection" in html
     assert 'role: "edit_pad_label"' in html
     assert "visualPos: markerPoint.slice()," in html
     assert "ndsAzimuthDeg: initialNds," in html

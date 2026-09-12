@@ -11,7 +11,9 @@ import numpy as np
 import pandas as pd
 import pytest
 from streamlit.testing.v1 import AppTest
+from streamlit.elements.lib import policies as widget_policies
 
+from pywp import coordinate_integration as ci
 from pywp import ptc_batch_results
 from pywp import ptc_core as wt_import_module
 from pywp import ptc_anticollision_params
@@ -1522,6 +1524,56 @@ def test_welltrack_page_defaults_csv_crs_to_wgs84_utm43() -> None:
     select_values = {str(widget.label): widget.value for widget in at.selectbox}
     assert select_values["Входная"] == "ГК_13N_42"
     assert select_values["Доп. в выгрузке"] == "WGS84 UTM 43N"
+
+
+def test_welltrack_page_renders_main_input_crs_selector() -> None:
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+
+    at.run(timeout=120)
+
+    assert any(
+        str(widget.label) == "Входная"
+        and "ГК_13N_42" in list(widget.options)
+        for widget in at.selectbox
+    )
+    assert any(
+        "Выберите ту систему координат, которая используется в вашей ГМ/ГДМ модели"
+        in str(item.value)
+        for item in at.caption
+    )
+
+
+@pytest.mark.parametrize(
+    "source_key",
+    [ci.CRS_INPUT_MAIN_SELECTBOX_KEY, ci.CRS_INPUT_SELECTBOX_KEY],
+)
+def test_welltrack_page_syncs_main_and_sidebar_input_crs(
+    source_key: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Streamlit otherwise emits this warning only once per Python process,
+    # which can hide regressions when another test has already triggered it.
+    monkeypatch.setattr(widget_policies, "_shown_default_value_warning", False)
+    at = AppTest.from_file("pages/01_trajectory_constructor.py")
+    at.run(timeout=120)
+    assert not at.exception
+    assert not at.warning
+
+    for label in ("ГСК2011 Зона 13", "ГК_12N_42", "ГК_13N_42"):
+        monkeypatch.setattr(widget_policies, "_shown_default_value_warning", False)
+        at.selectbox(key=source_key).set_value(label).run(timeout=120)
+        assert not at.exception
+        assert not at.warning
+        assert at.selectbox(key=ci.CRS_INPUT_MAIN_SELECTBOX_KEY).value == label
+        assert at.selectbox(key=ci.CRS_INPUT_SELECTBOX_KEY).value == label
+        assert at.session_state[ci.CRS_INPUT_SELECTED_KEY] == dict(ci.INPUT_CRS_OPTIONS)[label]
+        assert at.session_state[ci.CRS_SELECTED_KEY] == ci.DEFAULT_CSV_EXPORT_CRS
+
+        # An unrelated rerun must not restore a previous widget default.
+        at.run(timeout=120)
+        assert not at.exception
+        assert not at.warning
+        assert at.selectbox(key=ci.CRS_INPUT_MAIN_SELECTBOX_KEY).value == label
+        assert at.selectbox(key=ci.CRS_INPUT_SELECTBOX_KEY).value == label
 
 
 def test_welltrack_page_limits_csv_crs_options() -> None:

@@ -18,6 +18,7 @@ from pywp.coordinate_integration import (
     get_input_crs,
     get_selected_crs,
     render_crs_sidebar,
+    render_input_crs_section,
     should_auto_convert,
 )
 from pywp.ptc_page_import import render_target_import_section
@@ -129,6 +130,12 @@ def run_page() -> None:
 
     render_crs_sidebar()
     apply_page_style(max_width_px=1700)
+
+    st.markdown("## 0. Выбор системы координат")
+    st.caption(
+        "Выберите ту систему координат, которая используется в вашей ГМ/ГДМ модели"
+    )
+    render_input_crs_section()
 
     _render_target_import_section_fragment()
     edit_applied = st.session_state.pop("wt_edit_targets_applied", None)
