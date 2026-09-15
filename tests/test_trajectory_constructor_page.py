@@ -373,6 +373,31 @@ def test_apply_edit_pad_changes_updates_nds_azimuth() -> None:
     )
 
 
+def test_apply_edit_pad_changes_is_noop_when_geometry_is_unchanged() -> None:
+    ptc_core.st.session_state.clear()
+    records = _records()
+    ptc_core.st.session_state["wt_records"] = list(records)
+    ptc_core.st.session_state["wt_records_original"] = list(records)
+    pads = ptc_core._ensure_pad_configs(base_records=list(records))
+    pad_id = str(pads[0].pad_id)
+    cfg_before = dict(ptc_core.st.session_state["wt_pad_configs"][pad_id])
+    records_before = list(ptc_core.st.session_state["wt_records"])
+
+    anchor = [
+        float(cfg_before["first_surface_x"]),
+        float(cfg_before["first_surface_y"]),
+        float(cfg_before["first_surface_z"]),
+    ]
+    assert ptc_core._apply_edit_pad_changes(
+        [{"pad_id": pad_id, "anchor": anchor}],
+        source="three_viewer",
+    ) == []
+
+    assert ptc_core.st.session_state["wt_records"] == records_before
+    assert ptc_core.st.session_state["wt_pad_configs"][pad_id] == cfg_before
+    assert "wt_pad_last_applied_at" not in ptc_core.st.session_state
+
+
 def test_queue_surface_edit_feedback_merges_tuple_highlight_rows() -> None:
     ptc_core.st.session_state.clear()
     ptc_core.st.session_state["wt_edit_targets_pending_names"] = ["WELL-A"]
@@ -473,7 +498,7 @@ def test_queue_surface_edit_feedback_invalidates_only_changed_well_and_keeps_cac
     assert ptc_core.st.session_state["wt_pending_all_wells_results_focus"] is True
 
 
-def test_apply_edit_pad_changes_keeps_other_pads_incremental_cache() -> None:
+def test_apply_edit_pad_changes_keeps_other_pads_incremental_cache(monkeypatch) -> None:
     ptc_core.st.session_state.clear()
 
     def _pad_records(prefix: str, surface_x: float) -> list[WelltrackRecord]:
@@ -500,11 +525,20 @@ def test_apply_edit_pad_changes_keeps_other_pads_incremental_cache() -> None:
         *_pad_records("PAD-A", 0.0),
         *_pad_records("PAD-B", 10000.0),
         *_pad_records("PAD-C", 20000.0),
+        WelltrackRecord(
+            name="PAD-C_PL",
+            points=(
+                WelltrackPoint(x=19000.0, y=25.0, z=0.0, md=0.0),
+                WelltrackPoint(x=19500.0, y=25.0, z=1000.0, md=1000.0),
+            ),
+        ),
     ]
     ptc_core.st.session_state["wt_records"] = list(records)
     ptc_core.st.session_state["wt_records_original"] = list(records)
     ptc_core.st.session_state["wt_successes"] = [
-        SimpleNamespace(name=record.name) for record in records
+        SimpleNamespace(name=record.name)
+        for record in records
+        if not str(record.name).endswith("_PL")
     ]
     ptc_core.st.session_state["wt_summary_rows"] = [
         {"Скважина": record.name, "Статус": "OK", "Проблема": ""}
@@ -526,6 +560,10 @@ def test_apply_edit_pad_changes_keeps_other_pads_incremental_cache() -> None:
         )
     )
     ptc_core.st.session_state["wt_records"] = laid_out_records
+    records_by_name_before = {
+        str(record.name): record
+        for record in laid_out_records
+    }
     pad_id = "PAD-B"
     cfg = ptc_core.st.session_state["wt_pad_configs"][pad_id]
     anchor = [
@@ -534,12 +572,26 @@ def test_apply_edit_pad_changes_keeps_other_pads_incremental_cache() -> None:
         float(cfg["first_surface_z"]),
     ]
 
+    applied_pad_ids: list[str] = []
+    original_apply_pad_layout = ptc_core.apply_pad_layout
+
+    def _capture_apply_pad_layout(*, records, pads, plan_by_pad_id):
+        applied_pad_ids.extend(str(pad.pad_id) for pad in pads)
+        return original_apply_pad_layout(
+            records=records,
+            pads=pads,
+            plan_by_pad_id=plan_by_pad_id,
+        )
+
+    monkeypatch.setattr(ptc_core, "apply_pad_layout", _capture_apply_pad_layout)
+
     updated_names = ptc_core._apply_edit_pad_changes(
         [{"pad_id": pad_id, "anchor": anchor}],
         source="three_viewer",
     )
 
     assert updated_names == ["PAD-B-01", "PAD-B-02"]
+    assert applied_pad_ids == ["PAD-B"]
     assert ptc_core.st.session_state["wt_anticollision_analysis_cache"] is cache
     assert [item.name for item in ptc_core.st.session_state["wt_successes"]] == [
         "PAD-A-01",
@@ -547,6 +599,13 @@ def test_apply_edit_pad_changes_keeps_other_pads_incremental_cache() -> None:
         "PAD-C-01",
         "PAD-C-02",
     ]
+    records_by_name_after = {
+        str(record.name): record
+        for record in ptc_core.st.session_state["wt_records"]
+    }
+    for well_name in ("PAD-A-01", "PAD-A-02", "PAD-C-01", "PAD-C-02"):
+        assert records_by_name_after[well_name] == records_by_name_before[well_name]
+    assert records_by_name_after["PAD-C_PL"] == records_by_name_before["PAD-C_PL"]
     assert ptc_core.st.session_state["wt_edit_targets_pending_names"] == updated_names
 
 

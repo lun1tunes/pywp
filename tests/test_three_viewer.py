@@ -1077,6 +1077,51 @@ def test_three_viewer_pending_edit_save_has_recoverable_timeout() -> None:
     assert 'showEditSaveError("Нет подтверждения — повторить")' in html
 
 
+def test_three_viewer_refreshes_single_well_after_undo_redo_reset() -> None:
+    html = three_viewer._viewer_template_with_libraries()
+
+    # Undo, redo and reset must refresh the scene even for one selected well.
+    assert html.count("if (appliedIndices.length > 0) {") >= 3
+    assert "if (appliedIndices.length > 1) {" not in html
+
+
+def test_three_viewer_preserves_edit_context_during_payload_update() -> None:
+    html = three_viewer._viewer_template_with_libraries()
+
+    capture_pos = html.index("function captureEditRuntimeContext()")
+    apply_pos = html.index("const editRuntimeContext = captureEditRuntimeContext();")
+    restore_pos = html.index("function restoreEditRuntimeContext(context)")
+    restore_call_pos = html.index("restoreEditRuntimeContext(editRuntimeContext);")
+
+    assert capture_pos < restore_pos < apply_pos < restore_call_pos
+    assert "selectedPadId" in html
+    assert "selectedWellNames" in html
+    assert "selectedPointRole" in html
+    assert 'editToolbox.classList.add("is-visible");' in html
+    assert 'btn.classList.toggle("is-active", btn.dataset.plane === editPlane);' in html
+    assert 'btn.dataset.operation === editTransformMode' in html
+
+
+def test_three_viewer_preserves_collapsible_panel_state_across_payload_updates() -> None:
+    html = three_viewer._viewer_template_with_libraries()
+
+    assert "let legendPanelCollapsed = false;" in html
+    assert "let collisionsPanelCollapsed = false;" in html
+    assert "legendElement.classList.toggle(\"is-collapsed\", legendPanelCollapsed);" in html
+    assert "collisionsPanelElement.classList.toggle(\n            \"is-collapsed\",\n            collisionsPanelCollapsed,\n          );" in html
+
+
+def test_three_viewer_has_atomic_cancel_for_unsaved_edits() -> None:
+    html = three_viewer._viewer_template_with_libraries()
+
+    assert 'id="edit-cancel-btn"' in html
+    assert "function cancelEditChanges()" in html
+    assert "Отменить все несохранённые изменения?" in html
+    assert "originalEditState(wellIndex)" in html
+    assert "originalEditPadSurfacePoints(padIndex)" in html
+    assert "editCancelBtn.addEventListener(\"click\", cancelEditChanges);" in html
+
+
 def test_three_viewer_keyboard_arrows_move_selected_targets() -> None:
     html = three_viewer._viewer_template_with_libraries()
 

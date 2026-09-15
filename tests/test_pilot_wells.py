@@ -69,6 +69,45 @@ def test_alt_branch_name_can_pair_with_pilot_without_being_zbs() -> None:
     assert float(synced[1].points[0].y) == pytest.approx(20.0)
 
 
+def test_sync_pilot_surfaces_can_be_scoped_to_changed_pad_parent_keys() -> None:
+    parent_a = WelltrackRecord(
+        name="well_a",
+        points=(
+            WelltrackPoint(x=100.0, y=200.0, z=0.0, md=0.0),
+            WelltrackPoint(x=200.0, y=200.0, z=1000.0, md=1000.0),
+        ),
+    )
+    pilot_a = WelltrackRecord(
+        name="well_a_PL",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=50.0, y=0.0, z=700.0, md=700.0),
+        ),
+    )
+    parent_b = WelltrackRecord(
+        name="well_b",
+        points=(
+            WelltrackPoint(x=300.0, y=400.0, z=0.0, md=0.0),
+            WelltrackPoint(x=400.0, y=400.0, z=1000.0, md=1000.0),
+        ),
+    )
+    pilot_b = WelltrackRecord(
+        name="well_b_PL",
+        points=(
+            WelltrackPoint(x=1.0, y=2.0, z=0.0, md=0.0),
+            WelltrackPoint(x=60.0, y=0.0, z=700.0, md=700.0),
+        ),
+    )
+
+    synced = sync_pilot_surfaces_to_parents(
+        [parent_a, pilot_a, parent_b, pilot_b],
+        only_parent_keys={pilot_parent_key_for_record(parent_a)},
+    )
+
+    assert synced[1].points[0] == parent_a.points[0]
+    assert synced[3].points[0] == pilot_b.points[0]
+
+
 def test_pilot_parent_key_for_record_accepts_plain_name_inputs() -> None:
     branch = WelltrackRecord(
         name="well_04_2",

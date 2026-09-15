@@ -64,6 +64,59 @@ def test_dogleg_angle_zero_for_same_direction() -> None:
     assert np.isclose(beta, 0.0, atol=1e-7)
 
 
+@pytest.mark.parametrize("bad_value", [float("nan"), float("inf")])
+def test_dogleg_angle_rejects_non_finite_angles(bad_value: float) -> None:
+    with pytest.raises(ValueError, match="finite INC/AZI"):
+        dogleg_angle_rad(10.0, bad_value, 10.0, 20.0)
+
+
+@pytest.mark.parametrize("inc_deg", [-0.1, 180.1])
+def test_dogleg_angle_rejects_physically_invalid_inclination(inc_deg: float) -> None:
+    with pytest.raises(ValueError, match=r"INC values in \[0, 180\]"):
+        dogleg_angle_rad(inc_deg, 0.0, 10.0, 20.0)
+
+
+def test_compute_positions_min_curv_rejects_empty_stations() -> None:
+    stations = pd.DataFrame(columns=["MD_m", "INC_deg", "AZI_deg"])
+
+    with pytest.raises(ValueError, match="at least one station"):
+        compute_positions_min_curv(stations, start=Point3D(0.0, 0.0, 0.0))
+
+
+@pytest.mark.parametrize("inc_deg", [-0.1, 180.1])
+def test_compute_positions_min_curv_rejects_invalid_inc_even_for_single_station(
+    inc_deg: float,
+) -> None:
+    stations = pd.DataFrame(
+        {
+            "MD_m": [0.0],
+            "INC_deg": [inc_deg],
+            "AZI_deg": [0.0],
+        }
+    )
+
+    with pytest.raises(ValueError, match=r"INC values in \[0, 180\]"):
+        compute_positions_min_curv(stations, start=Point3D(0.0, 0.0, 0.0))
+
+
+def test_compute_positions_min_curv_is_deterministic_and_does_not_mutate_input() -> None:
+    stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 30.0, 75.0],
+            "INC_deg": [0.0, 35.0, 82.0],
+            "AZI_deg": [-10.0, 370.0, 45.0],
+            "segment": ["VERTICAL", "BUILD", "HOLD"],
+        }
+    )
+    before = stations.copy(deep=True)
+
+    first = compute_positions_min_curv(stations, start=Point3D(10.0, 20.0, 30.0))
+    second = compute_positions_min_curv(stations, start=Point3D(10.0, 20.0, 30.0))
+
+    pd.testing.assert_frame_equal(stations, before)
+    pd.testing.assert_frame_equal(first, second)
+
+
 def test_add_dls_returns_nan_for_zero_md_interval() -> None:
     stations = pd.DataFrame(
         {
@@ -75,6 +128,19 @@ def test_add_dls_returns_nan_for_zero_md_interval() -> None:
     )
     out = add_dls(stations)
     assert np.isnan(out.loc[1, "DLS_deg_per_30m"])
+
+
+def test_add_dls_rejects_non_finite_md() -> None:
+    stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, float("inf")],
+            "INC_deg": [0.0, 0.0],
+            "AZI_deg": [0.0, 0.0],
+        }
+    )
+
+    with pytest.raises(ValueError, match="finite MD values"):
+        add_dls(stations)
 
 
 def test_wrap_azimuth_deg_normalizes_negative_and_large_values() -> None:
@@ -179,6 +245,18 @@ def test_minimum_curvature_increment_rejects_non_positive_md_interval() -> None:
         )
 
 
+def test_minimum_curvature_increment_rejects_non_numeric_md() -> None:
+    with pytest.raises(ValueError, match="numeric MD values"):
+        minimum_curvature_increment(
+            md1_m="bad",  # type: ignore[arg-type]
+            inc1_deg=10.0,
+            azi1_deg=20.0,
+            md2_m=100.0,
+            inc2_deg=12.0,
+            azi2_deg=30.0,
+        )
+
+
 def test_compute_positions_min_curv_rejects_non_increasing_md() -> None:
     stations = pd.DataFrame(
         {
@@ -189,6 +267,32 @@ def test_compute_positions_min_curv_rejects_non_increasing_md() -> None:
     )
 
     with pytest.raises(ValueError, match="strictly increasing MD"):
+        compute_positions_min_curv(stations, start=Point3D(0.0, 0.0, 0.0))
+
+
+def test_compute_positions_min_curv_rejects_descending_md_without_reordering() -> None:
+    stations = pd.DataFrame(
+        {
+            "MD_m": [100.0, 0.0],
+            "INC_deg": [0.0, 0.0],
+            "AZI_deg": [0.0, 0.0],
+        }
+    )
+
+    with pytest.raises(ValueError, match="strictly increasing MD"):
+        compute_positions_min_curv(stations, start=Point3D(0.0, 0.0, 0.0))
+
+
+def test_compute_positions_min_curv_rejects_non_finite_coordinates() -> None:
+    stations = pd.DataFrame(
+        {
+            "MD_m": [-1.0e308, 1.0e308],
+            "INC_deg": [0.0, 0.0],
+            "AZI_deg": [0.0, 0.0],
+        }
+    )
+
+    with pytest.raises(ValueError, match="finite MD values"):
         compute_positions_min_curv(stations, start=Point3D(0.0, 0.0, 0.0))
 
 

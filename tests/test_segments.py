@@ -74,6 +74,104 @@ def test_make_md_grid_preserves_large_md_segment_endpoints() -> None:
     assert md[-1] == pytest.approx(md_end, abs=1e-12)
 
 
+@pytest.mark.parametrize("md_step_m", [0.0, -1.0, -1e-12])
+def test_make_md_grid_rejects_non_positive_step(md_step_m: float) -> None:
+    with pytest.raises(ValueError, match="md_step_m must be greater than zero"):
+        _make_md_grid(md_start=0.0, length_m=100.0, md_step_m=md_step_m)
+
+
+def test_make_md_grid_rejects_negative_length() -> None:
+    with pytest.raises(ValueError, match="length_m must be non-negative"):
+        _make_md_grid(md_start=100.0, length_m=-1.0, md_step_m=1.0)
+
+
+@pytest.mark.parametrize(
+    ("md_start", "length_m", "match"),
+    [
+        (1.0e308, 1.0e308, "finite value greater than md_start"),
+        (1.0e16, 1.0, "finite value greater than md_start"),
+    ],
+)
+def test_make_md_grid_rejects_unrepresentable_positive_endpoint(
+    md_start: float,
+    length_m: float,
+    match: str,
+) -> None:
+    with pytest.raises(ValueError, match=match):
+        _make_md_grid(md_start=md_start, length_m=length_m, md_step_m=1.0)
+
+
+def test_make_md_grid_rejects_unbounded_station_count() -> None:
+    with pytest.raises(ValueError, match="more than 1,000,000 stations"):
+        _make_md_grid(md_start=0.0, length_m=1_000_000.0, md_step_m=1.0)
+
+
+def test_make_md_grid_rejects_fractional_interval_count_over_station_limit() -> None:
+    with pytest.raises(ValueError, match="more than 1,000,000 stations"):
+        _make_md_grid(md_start=0.0, length_m=999_999.5, md_step_m=1.0)
+
+
+def test_make_md_grid_rejects_step_smaller_than_md_representation() -> None:
+    with pytest.raises(ValueError, match="distinct MD stations"):
+        _make_md_grid(md_start=1.0e16, length_m=10.0, md_step_m=0.1)
+
+
+def test_build_segment_uses_exact_interpolation_endpoints_after_md_offset() -> None:
+    segment = BuildSegment(
+        inc_from_deg=0.0,
+        inc_to_deg=23.1663582677428,
+        dls_deg_per_30m=6.0,
+        azi_deg=36.86989764584402,
+    )
+
+    stations = segment.generate(md_start=400.0, md_step_m=2.0)
+
+    assert stations.iloc[0]["INC_deg"] == pytest.approx(0.0, abs=1e-12)
+    assert stations.iloc[-1]["INC_deg"] == pytest.approx(segment.inc_to_deg, abs=1e-12)
+
+
+def test_make_md_grid_preserves_subnanometer_endpoint_when_representable() -> None:
+    md = _make_md_grid(md_start=0.0, length_m=1.0e-10, md_step_m=1.0)
+
+    assert md.tolist() == [0.0, 1.0e-10]
+
+
+def test_segments_reject_invalid_constructor_values() -> None:
+    with pytest.raises(ValueError, match="length_m must be non-negative"):
+        VerticalSegment(length_m=-1.0)
+    with pytest.raises(ValueError, match="inc_deg must be finite"):
+        HoldSegment(length_m=1.0, inc_deg=float("nan"), azi_deg=0.0)
+    with pytest.raises(ValueError, match="dls_deg_per_30m must be non-negative"):
+        BuildSegment(
+            inc_from_deg=0.0,
+            inc_to_deg=10.0,
+            dls_deg_per_30m=-1.0,
+            azi_deg=0.0,
+        )
+    with pytest.raises(ValueError, match="inc_deg must be in the range"):
+        HoldSegment(length_m=1.0, inc_deg=181.0, azi_deg=0.0)
+
+
+def test_zero_dls_is_allowed_only_for_zero_dogleg() -> None:
+    straight = BuildSegment(
+        inc_from_deg=20.0,
+        inc_to_deg=20.0,
+        dls_deg_per_30m=0.0,
+        azi_deg=10.0,
+        azi_to_deg=10.0,
+    )
+    assert straight.length_m == 0.0
+
+    turning = BuildSegment(
+        inc_from_deg=20.0,
+        inc_to_deg=30.0,
+        dls_deg_per_30m=0.0,
+        azi_deg=10.0,
+    )
+    with pytest.raises(ValueError, match="positive for a non-zero dogleg"):
+        _ = turning.length_m
+
+
 def test_welltrajectory_skips_submillimeter_segment_boundary_station() -> None:
     trajectory = WellTrajectory(
         [
@@ -237,6 +335,32 @@ def test_rodrigues_zero_dogleg() -> None:
     result = _rodrigues_directions(d, d, t)
     for row in result:
         np.testing.assert_allclose(row, d / np.linalg.norm(d), atol=1e-12)
+
+
+@pytest.mark.parametrize("interpolator", [_rodrigues_directions, _slerp_directions])
+def test_exact_antipodal_interpolation_is_deterministic_and_reaches_endpoint(interpolator) -> None:
+    start = _direction_vector(inc_deg=90.0, azi_deg=0.0)
+    end = -start
+    t = np.linspace(0.0, 1.0, 11)
+
+    result = interpolator(start, end, t)
+    result_again = interpolator(start, end, t)
+
+    np.testing.assert_allclose(result, result_again, atol=1e-12)
+    np.testing.assert_allclose(result[0], start, atol=1e-12)
+    np.testing.assert_allclose(result[-1], end, atol=1e-12)
+    np.testing.assert_allclose(np.linalg.norm(result, axis=1), 1.0, atol=1e-12)
+    assert np.all(np.isfinite(result))
+
+
+@pytest.mark.parametrize("interpolator", [_rodrigues_directions, _slerp_directions])
+def test_direction_interpolation_rejects_parameters_outside_unit_interval(interpolator) -> None:
+    with pytest.raises(ValueError, match=r"in \[0, 1\]"):
+        interpolator(
+            _direction_vector(inc_deg=20.0, azi_deg=0.0),
+            _direction_vector(inc_deg=30.0, azi_deg=20.0),
+            np.array([-0.1, 0.5, 1.1]),
+        )
 
 
 # ---------------------------------------------------------------------------

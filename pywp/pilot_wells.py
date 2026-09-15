@@ -324,8 +324,15 @@ def zbs_multi_horizontal_level_count(points: tuple[WelltrackPoint, ...]) -> int:
 
 def sync_pilot_surfaces_to_parents(
     records: Iterable[WelltrackRecord],
+    *,
+    only_parent_keys: Iterable[str] | None = None,
 ) -> list[WelltrackRecord]:
     record_list = list(records)
+    scoped_parent_keys = (
+        {str(key).strip().casefold() for key in only_parent_keys if str(key).strip()}
+        if only_parent_keys is not None
+        else None
+    )
     parent_by_key: dict[str, WelltrackRecord] = {}
     for record in record_list:
         if is_pilot_record(record) or is_zbs_record(record):
@@ -336,7 +343,11 @@ def sync_pilot_surfaces_to_parents(
         if not is_pilot_record(record) or not record.points:
             synced.append(record)
             continue
-        parent = parent_by_key.get(pilot_parent_key_for_record(record))
+        parent_key = pilot_parent_key_for_record(record)
+        if scoped_parent_keys is not None and parent_key.casefold() not in scoped_parent_keys:
+            synced.append(record)
+            continue
+        parent = parent_by_key.get(parent_key)
         if parent is None or not parent.points:
             synced.append(record)
             continue

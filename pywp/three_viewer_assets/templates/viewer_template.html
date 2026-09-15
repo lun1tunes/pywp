@@ -2010,6 +2010,7 @@
               <button id="edit-undo-btn" class="edit-tool-btn" type="button" title="Отменить последнее изменение выбранной скважины">Назад</button>
               <button id="edit-redo-btn" class="edit-tool-btn" type="button" title="Повторить отменённое изменение выбранной скважины">Вперёд</button>
               <button id="edit-reset-btn" class="edit-tool-btn is-reset" type="button" title="Вернуть выбранную скважину к исходным точкам">Сброс</button>
+              <button id="edit-cancel-btn" class="edit-tool-btn is-reset" type="button" title="Отменить все несохранённые изменения">Отмена</button>
             </div>
           </div>
       </div>
@@ -2239,6 +2240,8 @@
         let needsRender = true;
         let pointerScreen = { x: 0, y: 0, inside: false };
         let legendTreeExpanded = true;
+        let legendPanelCollapsed = false;
+        let collisionsPanelCollapsed = false;
         let interactionActive = false;
         const miniMapState = {
           expanded: false,
@@ -5687,7 +5690,6 @@
           }
 
           // --- Header: title + optional tree-toggle action + collapse button ---
-          var legendPanelCollapsed = false;
           const header = document.createElement("div");
           header.className = "legend-header";
           const title = document.createElement("div");
@@ -5699,6 +5701,8 @@
           collapseBtn.className = "legend-collapse-btn";
           collapseBtn.textContent = "\u25BC";
           collapseBtn.title = "Свернуть / развернуть";
+          legendElement.classList.toggle("is-collapsed", legendPanelCollapsed);
+          collapseBtn.classList.toggle("is-collapsed", legendPanelCollapsed);
           collapseBtn.addEventListener("click", function (e) {
             e.stopPropagation();
             legendPanelCollapsed = !legendPanelCollapsed;
@@ -5808,7 +5812,6 @@
           }
 
           // --- Header: title + count + collapse button ---
-          let collisionsPanelCollapsed = false;
           const header = document.createElement("div");
           header.className = "collisions-header";
           const title = document.createElement("div");
@@ -5823,6 +5826,11 @@
           collapseBtn.className = "collisions-collapse-btn";
           collapseBtn.textContent = "▼";
           collapseBtn.title = "Свернуть / развернуть";
+          collisionsPanelElement.classList.toggle(
+            "is-collapsed",
+            collisionsPanelCollapsed,
+          );
+          collapseBtn.classList.toggle("is-collapsed", collisionsPanelCollapsed);
           collapseBtn.addEventListener("click", function (e) {
             e.stopPropagation();
             collisionsPanelCollapsed = !collisionsPanelCollapsed;
@@ -7415,6 +7423,7 @@
         const editUndoBtn = document.getElementById("edit-undo-btn");
         const editRedoBtn = document.getElementById("edit-redo-btn");
         const editResetBtn = document.getElementById("edit-reset-btn");
+        const editCancelBtn = document.getElementById("edit-cancel-btn");
         const editSaveBtn = document.getElementById("edit-save-btn");
         const editInspector = document.getElementById("edit-inspector");
         const editPointEditor = document.getElementById("edit-point-editor");
@@ -7450,6 +7459,7 @@
           editUndoBtn &&
           editRedoBtn &&
           editResetBtn &&
+          editCancelBtn &&
           editSaveBtn &&
           editInspector
         );
@@ -9818,6 +9828,7 @@
                 ? !Boolean(editPadDirtyFlags[selectedPad])
                 : !Boolean(editDirtyFlags[selectedIndex])
             );
+          editCancelBtn.disabled = !editModeActive || !editHasAnyChange;
           editPlaneSelector.querySelectorAll(".plane-btn").forEach((btn) => {
             btn.disabled =
               !editModeActive ||
@@ -9887,7 +9898,7 @@
               appliedIndices.push(selectedIndex);
             }
           });
-          if (appliedIndices.length > 1) {
+          if (appliedIndices.length > 0) {
             syncEditVisibility();
             showEditFeedback();
             requestRender();
@@ -9932,7 +9943,7 @@
               appliedIndices.push(selectedIndex);
             }
           });
-          if (appliedIndices.length > 1) {
+          if (appliedIndices.length > 0) {
             syncEditVisibility();
             showEditFeedback();
             requestRender();
@@ -9977,11 +9988,47 @@
             applyEditState(selectedIndex, originalState);
             appliedIndices.push(selectedIndex);
           });
-          if (appliedIndices.length > 1) {
+          if (appliedIndices.length > 0) {
             syncEditVisibility();
             showEditFeedback();
             requestRender();
           }
+        }
+
+        function cancelEditChanges() {
+          if (!editModeActive) {
+            return;
+          }
+          if (
+            editHasAnyChange &&
+            !window.confirm("Отменить все несохранённые изменения?")
+          ) {
+            return;
+          }
+          editDirtyFlags.forEach((isDirty, wellIndex) => {
+            if (!isDirty) {
+              return;
+            }
+            applyEditState(wellIndex, originalEditState(wellIndex));
+            editUndoStacks[wellIndex] = [];
+            editRedoStacks[wellIndex] = [];
+          });
+          editPadDirtyFlags.forEach((isDirty, padIndex) => {
+            if (!isDirty) {
+              return;
+            }
+            applyEditPadState(
+              padIndex,
+              editPadOriginalAnchors[padIndex],
+              originalEditPadSurfacePoints(padIndex),
+              editPadOriginalNds[padIndex],
+            );
+            editPadUndoStacks[padIndex] = [];
+            editPadRedoStacks[padIndex] = [];
+          });
+          editHasAnyChange = false;
+          resetEditSaveButtonState();
+          setEditMode(false);
         }
 
         function initEditHandles() {
@@ -12154,6 +12201,132 @@
           optionalReferenceLabels.forEach((item) => addLabel(item));
         }
 
+        function captureEditRuntimeContext() {
+          const selectedWellIndices = selectedEditWellIndexArray();
+          const selectedWellNames = selectedWellIndices
+            .map((index) => String((editWells[index] && editWells[index].name) || ""))
+            .filter((name) => name.length > 0);
+          const primaryWellName = Number.isInteger(selectedEditWellIndex)
+            ? String((editWells[selectedEditWellIndex] && editWells[selectedEditWellIndex].name) || "")
+            : "";
+          const selectedPadId = isValidEditPadIndex(selectedEditPadIndex)
+            ? String((editPads[selectedEditPadIndex] && editPads[selectedEditPadIndex].id) || "")
+            : "";
+          const selectedHandle = selectedEditHandle();
+          return {
+            active: Boolean(editModeActive),
+            selectedPadId: selectedPadId,
+            selectedWellNames: selectedWellNames,
+            primaryWellName: primaryWellName,
+            selectedPointRole: String((selectedHandle && selectedHandle.pointRole) || ""),
+            selectedPointLabel: String((selectedHandle && selectedHandle.pointType) || ""),
+            selectedPointIndex: Number.isInteger(selectedHandle && selectedHandle.pointIndex)
+              ? Number(selectedHandle.pointIndex)
+              : null,
+            plane: String(editPlane || "xy"),
+            moveScope: String(editMoveScope || "point"),
+            transformMode: String(editTransformMode || "move"),
+            warningDismissed: Boolean(editWarningDismissed),
+          };
+        }
+
+        function restoreEditRuntimeContext(context) {
+          if (!context || !context.active || !canEditTargets) {
+            return;
+          }
+
+          selectedEditPadIndex = null;
+          selectedEditWellIndex = null;
+          selectedEditWellIndices = new Set();
+          editLegendSelectionAnchorIndex = null;
+
+          const rawPadIndex = context.selectedPadId
+            ? editPadIndexById.get(String(context.selectedPadId))
+            : null;
+          const padIndex = Number(rawPadIndex);
+          if (isValidEditPadIndex(padIndex)) {
+            selectedEditPadIndex = padIndex;
+            selectedEditHandleIndex = null;
+          } else {
+            const restoredIndices = (Array.isArray(context.selectedWellNames)
+              ? context.selectedWellNames
+              : [])
+              .map((name) => editWellIndexByName.get(String(name)))
+              .filter((index) => isValidEditWellIndex(index));
+            const uniqueIndices = Array.from(new Set(restoredIndices));
+            const primaryIndex = editWellIndexByName.get(String(context.primaryWellName || ""));
+            if (uniqueIndices.length > 0) {
+              selectedEditWellIndices = new Set(uniqueIndices);
+              selectedEditWellIndex = isValidEditWellIndex(primaryIndex)
+                ? Number(primaryIndex)
+                : uniqueIndices[0];
+              editLegendSelectionAnchorIndex = selectedEditWellIndex;
+            } else if (editWells.length > 0) {
+              selectedEditWellIndex = 0;
+              selectedEditWellIndices = new Set([0]);
+              editLegendSelectionAnchorIndex = 0;
+            }
+          }
+
+          editPlane =
+            selectedEditPadIndex === null && context.plane === "z" ? "z" : "xy";
+          editMoveScope = ["point", "well", "after"].includes(context.moveScope)
+            ? context.moveScope
+            : "point";
+          editTransformMode = "move";
+          editModeActive = true;
+          editWarningDismissed = Boolean(context.warningDismissed);
+          editTargetsBtn.classList.add("is-active");
+          editTargetsBtn.textContent = "Завершить редактирование";
+          editToolbox.classList.add("is-visible");
+
+          if (selectedEditPadIndex === null && Number.isInteger(selectedEditWellIndex)) {
+            const exactHandleIndex = editHandles.findIndex((handle) =>
+              handle &&
+              handle.wellIndex === selectedEditWellIndex &&
+              String(handle.pointRole || "") === String(context.selectedPointRole || "") &&
+              String(handle.pointType || "") === String(context.selectedPointLabel || "") &&
+              Number(handle.pointIndex) === Number(context.selectedPointIndex),
+            );
+            const roleHandleIndex = handleIndexForWellPointRole(
+              selectedEditWellIndex,
+              context.selectedPointRole,
+            );
+            selectedEditHandleIndex = exactHandleIndex >= 0
+              ? exactHandleIndex
+              : roleHandleIndex;
+          } else {
+            selectedEditHandleIndex = null;
+          }
+          syncSelectedEditHandle();
+          if (
+            context.transformMode === "rotate" &&
+            selectedEditPadIndex === null &&
+            Number.isInteger(selectedEditWellIndex) &&
+            selectedEditWellIndices.size <= 1 &&
+            editWellSupportsRotation(selectedEditWellIndex)
+          ) {
+            editTransformMode = "rotate";
+          }
+          editPlaneSelector.querySelectorAll(".plane-btn").forEach((btn) => {
+            btn.classList.toggle("is-active", btn.dataset.plane === editPlane);
+          });
+          editScopeSelector.querySelectorAll(".scope-btn").forEach((btn) => {
+            btn.classList.toggle("is-active", btn.dataset.scope === editMoveScope);
+          });
+          editOperationSelector.querySelectorAll(".operation-btn").forEach((btn) => {
+            btn.classList.toggle(
+              "is-active",
+              btn.dataset.operation === editTransformMode,
+            );
+          });
+          resetEditSaveButtonState();
+          syncEditVisibility();
+          showEditFeedback();
+          syncEditToolboxState();
+          requestRender();
+        }
+
         function removeTrackedObjectFromCollections(object) {
           const hoverIndex = hoverTargets.indexOf(object);
           if (hoverIndex >= 0) {
@@ -12334,6 +12507,7 @@
           const resolvedPayload =
             nextPayload && typeof nextPayload === "object" ? nextPayload : {};
           const preserveView = Boolean(options && options.preserveView);
+          const editRuntimeContext = captureEditRuntimeContext();
           const oldSceneOrigin = {
             x: Number(sceneOrigin && sceneOrigin.x) || 0,
             y: Number(sceneOrigin && sceneOrigin.y) || 0,
@@ -12380,6 +12554,7 @@
           if (canEditTargets) {
             initEditHandles();
             initEditPads();
+            restoreEditRuntimeContext(editRuntimeContext);
             syncEditVisibility();
             syncEditToolboxState();
           }
@@ -12471,6 +12646,7 @@
           editUndoBtn.addEventListener("click", undoSelectedEdit);
           editRedoBtn.addEventListener("click", redoSelectedEdit);
           editResetBtn.addEventListener("click", resetSelectedEdit);
+          editCancelBtn.addEventListener("click", cancelEditChanges);
           editSaveBtn.addEventListener("click", onEditSave);
           if (editApplySidetrack) {
             editApplySidetrack.addEventListener("click", applySidetrackFromInspector);

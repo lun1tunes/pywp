@@ -12048,7 +12048,7 @@ SMALL: float = 1e-9
 __all__ = ["DEG2RAD", "RAD2DEG", "SMALL"]
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/coordinate_integration.py	34568
+===BEGIN_FILE===	pywp/coordinate_integration.py	36769
 """Integration of coordinate systems with trajectory planning UI.
 
 Provides sidebar controls and coordinate transformation for well trajectory results.
@@ -12087,6 +12087,7 @@ logger = logging.getLogger(__name__)
 # Session state keys
 CRS_INPUT_SELECTED_KEY = "trajectory_input_crs_selected"
 CRS_INPUT_SELECTBOX_KEY = "trajectory_input_crs_selectbox"
+CRS_INPUT_MAIN_SELECTBOX_KEY = "trajectory_input_crs_main_selectbox"
 CRS_SELECTED_KEY = "trajectory_crs_selected"  # CSV target CRS, kept for compatibility
 CRS_SELECTBOX_KEY = "trajectory_crs_selectbox"
 CRS_AUTO_CONVERT_KEY = "trajectory_crs_auto_convert"
@@ -12257,10 +12258,6 @@ _DEFAULT_CRS_INDEX = next(
     (i for i, (_, c) in enumerate(CSV_CRS_OPTIONS) if c == DEFAULT_CSV_EXPORT_CRS),
     0,
 )
-_DEFAULT_INPUT_CRS_INDEX = next(
-    (i for i, (_, c) in enumerate(INPUT_CRS_OPTIONS) if c == DEFAULT_CRS),
-    0,
-)
 
 
 def _streamlit():
@@ -12280,6 +12277,79 @@ def _get_crs_index(
         if c == crs:
             return i
     return default_index
+
+
+def _input_crs_label_to_value(label: object) -> CoordinateSystem:
+    normalized_label = CRS_LABEL_ALIASES.get(str(label), str(label))
+    return next(
+        (
+            crs
+            for option_label, crs in INPUT_CRS_OPTIONS
+            if option_label == normalized_label
+        ),
+        DEFAULT_CRS,
+    )
+
+
+def _sync_input_crs_selectors(source_key: str) -> None:
+    """Keep the main-page and sidebar input CRS widgets on one selection."""
+    st = _streamlit()
+    selected_label = CRS_LABEL_ALIASES.get(
+        str(st.session_state.get(source_key, "")),
+        str(st.session_state.get(source_key, "")),
+    )
+    if selected_label not in INPUT_CRS_LABEL_BY_VALUE.values():
+        selected_label = INPUT_CRS_LABEL_BY_VALUE[DEFAULT_CRS]
+    st.session_state[CRS_INPUT_SELECTED_KEY] = _input_crs_label_to_value(
+        selected_label
+    )
+    other_key = (
+        CRS_INPUT_SELECTBOX_KEY
+        if source_key == CRS_INPUT_MAIN_SELECTBOX_KEY
+        else CRS_INPUT_MAIN_SELECTBOX_KEY
+    )
+    st.session_state[other_key] = selected_label
+
+
+def _prepare_input_crs_widget_state(
+    widget_key: str,
+    current_crs: CoordinateSystem,
+) -> None:
+    st = _streamlit()
+    # Both widgets are rendered with index=None. Their visible value must
+    # therefore be seeded from the canonical CRS before each widget is built;
+    # doing so avoids Streamlit's default-value/session-state duplication
+    # warning while keeping programmatic CRS changes synchronized as well.
+    st.session_state[widget_key] = INPUT_CRS_LABEL_BY_VALUE.get(
+        current_crs,
+        INPUT_CRS_LABEL_BY_VALUE[DEFAULT_CRS],
+    )
+
+
+def render_input_crs_section() -> CoordinateSystem:
+    """Render the compact main-page input CRS selector (section 0)."""
+    st = _streamlit()
+    current_input_crs = get_input_crs()
+    input_option_labels = [label for label, _ in INPUT_CRS_OPTIONS]
+    _prepare_input_crs_widget_state(
+        CRS_INPUT_MAIN_SELECTBOX_KEY,
+        current_input_crs,
+    )
+    selected_label = st.selectbox(
+        "Входная",
+        options=input_option_labels,
+        index=None,
+        key=CRS_INPUT_MAIN_SELECTBOX_KEY,
+        on_change=_sync_input_crs_selectors,
+        args=(CRS_INPUT_MAIN_SELECTBOX_KEY,),
+        help=(
+            "Система координат исходных X/Y. Используйте СК, в которой "
+            "задана ГМ/ГДМ модель."
+        ),
+    )
+    input_crs = _input_crs_label_to_value(selected_label)
+    st.session_state[CRS_INPUT_SELECTED_KEY] = input_crs
+    return input_crs
 
 
 def render_crs_sidebar() -> CoordinateSystem:
@@ -12312,20 +12382,17 @@ def render_crs_sidebar() -> CoordinateSystem:
             st.session_state[CRS_SELECTED_KEY] = DEFAULT_CSV_EXPORT_CRS
 
         input_option_labels = [label for label, _ in INPUT_CRS_OPTIONS]
-        previous_label = st.session_state.get(CRS_INPUT_SELECTBOX_KEY)
-        if previous_label in CRS_LABEL_ALIASES:
-            st.session_state[CRS_INPUT_SELECTBOX_KEY] = CRS_LABEL_ALIASES[previous_label]
-        if st.session_state.get(CRS_INPUT_SELECTBOX_KEY) not in input_option_labels:
-            st.session_state.pop(CRS_INPUT_SELECTBOX_KEY, None)
+        _prepare_input_crs_widget_state(
+            CRS_INPUT_SELECTBOX_KEY,
+            current_input_crs,
+        )
         selected_input_label = st.selectbox(
             "Входная",
             options=input_option_labels,
-            index=_get_crs_index(
-                current_input_crs,
-                INPUT_CRS_OPTIONS,
-                default_index=_DEFAULT_INPUT_CRS_INDEX,
-            ),
+            index=None,
             key=CRS_INPUT_SELECTBOX_KEY,
+            on_change=_sync_input_crs_selectors,
+            args=(CRS_INPUT_SELECTBOX_KEY,),
             help=(
                 "Система координат исходных X/Y. Расчёт и отображение ведутся в этих координатах. "
                 "СК-42 Зона N — полный зональный отсчёт; ГК_NN_42 — сокращённый, "
@@ -13014,6 +13081,7 @@ def get_crs_display_suffix(crs: CoordinateSystem) -> str:
 
 __all__ = [
     "render_crs_sidebar",
+    "render_input_crs_section",
     "get_input_crs",
     "get_selected_crs",
     "should_auto_convert",
@@ -15264,7 +15332,7 @@ def _symmetrized_covariance(covariance: np.ndarray) -> np.ndarray:
     return 0.5 * (cov + np.swapaxes(cov, -1, -2))
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/mcm.py	5494
+===BEGIN_FILE===	pywp/mcm.py	7529
 from __future__ import annotations
 
 import numpy as np
@@ -15289,6 +15357,15 @@ def dogleg_angle_rad(
     i2 = np.asarray(inc2_deg, dtype=float) * DEG2RAD
     a1 = np.asarray(azi1_deg, dtype=float) * DEG2RAD
     a2 = np.asarray(azi2_deg, dtype=float) * DEG2RAD
+    if not all(
+        np.all(np.isfinite(values))
+        for values in (i1, i2, a1, a2)
+    ):
+        raise ValueError("dogleg angle requires finite INC/AZI values.")
+    if np.any((i1 < 0.0) | (i1 > np.pi)) or np.any(
+        (i2 < 0.0) | (i2 > np.pi)
+    ):
+        raise ValueError("dogleg angle requires INC values in [0, 180] degrees.")
 
     cos_beta = np.cos(i1) * np.cos(i2) + np.sin(i1) * np.sin(i2) * np.cos(a2 - a1)
     cos_beta = np.clip(cos_beta, -1.0, 1.0)
@@ -15331,6 +15408,8 @@ def dls_deg_per_30m(
     azi2_deg: np.ndarray | float,
 ) -> np.ndarray:
     dmd = np.asarray(md2_m, dtype=float) - np.asarray(md1_m, dtype=float)
+    if np.any(~np.isfinite(dmd)):
+        raise ValueError("DLS calculation requires finite MD values.")
     beta_deg = dogleg_angle_rad(inc1_deg, azi1_deg, inc2_deg, azi2_deg) * RAD2DEG
     with np.errstate(divide="ignore", invalid="ignore"):
         dls = np.where(dmd > 0.0, beta_deg * (30.0 / dmd), np.nan)
@@ -15345,9 +15424,28 @@ def minimum_curvature_increment(
     inc2_deg: float,
     azi2_deg: float,
 ) -> tuple[float, float, float]:
-    dmd = float(md2_m - md1_m)
+    try:
+        md1 = float(md1_m)
+        md2 = float(md2_m)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("minimum-curvature increment requires numeric MD values.") from exc
+    dmd = float(md2 - md1)
+    if not np.isfinite(dmd):
+        raise ValueError("minimum-curvature increment requires finite MD values.")
     if dmd <= 0.0:
         raise ValueError("minimum-curvature increment requires md2_m > md1_m.")
+
+    try:
+        angles = tuple(
+            float(value)
+            for value in (inc1_deg, azi1_deg, inc2_deg, azi2_deg)
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "minimum-curvature increment requires numeric INC/AZI values."
+        ) from exc
+    if not all(np.isfinite(value) for value in angles):
+        raise ValueError("minimum-curvature increment requires finite INC/AZI values.")
 
     i1 = float(inc1_deg) * DEG2RAD
     i2 = float(inc2_deg) * DEG2RAD
@@ -15368,8 +15466,13 @@ def compute_positions_min_curv(stations: pd.DataFrame, start: Point3D) -> pd.Dat
     missing = required_cols.difference(stations.columns)
     if missing:
         raise ValueError(f"stations is missing required columns: {sorted(missing)}")
+    if stations.empty:
+        raise ValueError("minimum-curvature stations must contain at least one station.")
 
-    df = stations.sort_values("MD_m").reset_index(drop=True).copy()
+    # Preserve the caller's station order.  Sorting here would silently turn
+    # a malformed survey into a different trajectory; the monotonicity check
+    # below must validate the supplied order instead.
+    df = stations.reset_index(drop=True).copy()
     md_values = df["MD_m"].to_numpy(dtype=float)
     inc_values = df["INC_deg"].to_numpy(dtype=float)
     azi_values = df["AZI_deg"].to_numpy(dtype=float)
@@ -15379,8 +15482,15 @@ def compute_positions_min_curv(stations: pd.DataFrame, start: Point3D) -> pd.Dat
         and np.all(np.isfinite(azi_values))
     ):
         raise ValueError("minimum-curvature stations require finite MD/INC/AZI values.")
-    if len(md_values) > 1 and np.any(np.diff(md_values) <= 0.0):
-        raise ValueError("minimum-curvature stations require strictly increasing MD.")
+    if np.any((inc_values < 0.0) | (inc_values > 180.0)):
+        raise ValueError(
+            "minimum-curvature stations require INC values in [0, 180] degrees."
+        )
+    if len(md_values) > 1:
+        with np.errstate(over="ignore", invalid="ignore"):
+            md_differences = np.diff(md_values)
+        if np.any(md_differences <= 0.0):
+            raise ValueError("minimum-curvature stations require strictly increasing MD.")
     df["AZI_deg"] = wrap_azimuth_deg(df["AZI_deg"].to_numpy())
 
     north = [start.y]
@@ -15399,6 +15509,15 @@ def compute_positions_min_curv(stations: pd.DataFrame, start: Point3D) -> pd.Dat
         north.append(north[-1] + d_n)
         east.append(east[-1] + d_e)
         tvd.append(tvd[-1] + d_tvd)
+
+    if not (
+        np.all(np.isfinite(north))
+        and np.all(np.isfinite(east))
+        and np.all(np.isfinite(tvd))
+    ):
+        raise ValueError(
+            "minimum-curvature calculation produced non-finite coordinates."
+        )
 
     df["N_m"] = north
     df["E_m"] = east
@@ -18534,7 +18653,7 @@ def normalize_user_path_text(raw_path: object) -> str:
     return text
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/pilot_wells.py	93818
+===BEGIN_FILE===	pywp/pilot_wells.py	94235
 from __future__ import annotations
 
 import math
@@ -18861,8 +18980,15 @@ def zbs_multi_horizontal_level_count(points: tuple[WelltrackPoint, ...]) -> int:
 
 def sync_pilot_surfaces_to_parents(
     records: Iterable[WelltrackRecord],
+    *,
+    only_parent_keys: Iterable[str] | None = None,
 ) -> list[WelltrackRecord]:
     record_list = list(records)
+    scoped_parent_keys = (
+        {str(key).strip().casefold() for key in only_parent_keys if str(key).strip()}
+        if only_parent_keys is not None
+        else None
+    )
     parent_by_key: dict[str, WelltrackRecord] = {}
     for record in record_list:
         if is_pilot_record(record) or is_zbs_record(record):
@@ -18873,7 +18999,11 @@ def sync_pilot_surfaces_to_parents(
         if not is_pilot_record(record) or not record.points:
             synced.append(record)
             continue
-        parent = parent_by_key.get(pilot_parent_key_for_record(record))
+        parent_key = pilot_parent_key_for_record(record)
+        if scoped_parent_keys is not None and parent_key.casefold() not in scoped_parent_keys:
+            synced.append(record)
+            continue
+        parent = parent_by_key.get(parent_key)
         if parent is None or not parent.points:
             synced.append(record)
             continue
@@ -26953,144 +27083,3 @@ def _slsqp_search_probes(
         return [seed]
 
     reduced_bounds = [bounds[index] for index in free_indices]
-    reduced_seed = np.asarray(
-        [float(seed[index]) for index in free_indices], dtype=float
-    )
-
-    def expand_reduced(values_reduced: np.ndarray) -> np.ndarray:
-        full = seed.copy()
-        for index, value in fixed.items():
-            full[index] = float(value)
-        for reduced_index, free_index in enumerate(free_indices):
-            full[free_index] = float(values_reduced[reduced_index])
-        return _apply_fixed_search_components_to_vector(
-            vector=full,
-            bounds=bounds,
-            fixed_components=fixed,
-        )
-
-    constraints = [
-        {
-            "type": "ineq",
-            "fun": (
-                lambda values_reduced, fn=constraint_fn: fn(
-                    expand_reduced(np.asarray(values_reduced, dtype=float))
-                )
-            ),
-        }
-        for constraint_fn in constraint_functions
-    ]
-    result = minimize(
-        fun=lambda values_reduced: objective(
-            expand_reduced(np.asarray(values_reduced, dtype=float))
-        ),
-        x0=reduced_seed,
-        method="SLSQP",
-        bounds=list(reduced_bounds),
-        constraints=constraints,
-        options={
-            "maxiter": int(maxiter),
-            "ftol": 1e-8,
-            "disp": False,
-        },
-    )
-
-    probes = [expand_reduced(reduced_seed)]
-    if bool(result.success) and np.all(np.isfinite(result.x)):
-        probes.append(expand_reduced(np.asarray(result.x, dtype=float)))
-    return _dedupe_seed_vectors(probes)
-
-
-def _split_build_rescue_seed_vectors(
-    *,
-    base_seed_vectors: list[np.ndarray],
-    geometry: SectionGeometry,
-    bounds: tuple[tuple[float, float], ...],
-    search_settings: TurnSearchSettings,
-    build_dls_upper_deg_per_30m: float,
-) -> list[np.ndarray]:
-    seeds: list[np.ndarray] = []
-    for seed in base_seed_vectors:
-        if len(seed) < 5:
-            continue
-        build_unit = float(seed[0])
-        rest = np.asarray(seed[1:], dtype=float)
-        seeds.extend(
-            [
-                np.r_[build_unit, build_unit, rest],
-                np.r_[1.0, build_unit, rest],
-                np.r_[build_unit, 1.0, rest],
-                np.r_[1.0, 0.8, rest],
-                np.r_[0.8, 1.0, rest],
-            ]
-        )
-    build_units = _build_unit_seed_values(search_settings=search_settings)
-    for seed in _deep_low_angle_turn_seed_vectors(
-        geometry=geometry,
-        build_units=build_units,
-        bounds=bounds,
-        build_dls_upper_deg_per_30m=build_dls_upper_deg_per_30m,
-    ):
-        build_unit = float(seed[0])
-        rest = np.asarray(seed[1:], dtype=float)
-        seeds.extend(
-            [
-                np.r_[build_unit, build_unit, rest],
-                np.r_[1.0, build_unit, rest],
-                np.r_[build_unit, 1.0, rest],
-            ]
-        )
-    return _dedupe_seed_vectors(seeds)[:SPLIT_BUILD_RESCUE_MAX_STARTS]
-
-
-def _collect_zero_azimuth_split_build_candidates(
-    *,
-    geometry: SectionGeometry,
-    build_dls_lower_deg_per_30m: float,
-    build_dls_upper_deg_per_30m: float,
-    build2_dls_upper_deg_per_30m: float | None,
-    post_entry: PostEntrySection,
-    target_point: np.ndarray,
-    config: TrajectoryConfig,
-    search_settings: TurnSearchSettings,
-) -> tuple[list[ProfileParameters], tuple[float, float, float, float]]:
-    resolved_build2_upper = (
-        float(build_dls_upper_deg_per_30m)
-        if build2_dls_upper_deg_per_30m is None
-        else float(build2_dls_upper_deg_per_30m)
-    )
-    if (
-        max(float(build_dls_upper_deg_per_30m), resolved_build2_upper)
-        <= build_dls_lower_deg_per_30m + SMALL
-    ):
-        return [], (
-            np.inf,
-            np.inf,
-            np.inf,
-            float(max(build_dls_upper_deg_per_30m, resolved_build2_upper)),
-        )
-
-    build1_values = list(
-        _preferred_build_dls_values(
-            lower_dls_deg_per_30m=build_dls_lower_deg_per_30m,
-            upper_dls_deg_per_30m=build_dls_upper_deg_per_30m,
-        )
-    )
-    build2_values = list(
-        _preferred_build_dls_values(
-            lower_dls_deg_per_30m=build_dls_lower_deg_per_30m,
-            upper_dls_deg_per_30m=resolved_build2_upper,
-        )
-    )
-    for unit_value in _build_unit_seed_values(search_settings):
-        build1_values.append(
-            _decode_build_dls_from_unit(
-                unit_value=float(unit_value),
-                lower_dls_deg_per_30m=build_dls_lower_deg_per_30m,
-                upper_dls_deg_per_30m=build_dls_upper_deg_per_30m,
-            )
-        )
-        build2_values.append(
-            _decode_build_dls_from_unit(
-                unit_value=float(unit_value),
-                lower_dls_deg_per_30m=build_dls_lower_deg_per_30m,

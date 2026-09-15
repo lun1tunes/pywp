@@ -8608,6 +8608,35 @@ def test_render_three_payload_uses_local_three_renderer(monkeypatch) -> None:
     assert captured["payload"]["lines"]
 
 
+def test_render_three_payload_reruns_only_its_fragment_after_edit(monkeypatch) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    rerun_calls: list[str] = []
+
+    class _DummyContainer:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(page, "render_local_three_scene", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(page, "_handle_three_edit_event", lambda _event: True)
+    monkeypatch.setattr(
+        page,
+        "_rerun_fragment",
+        lambda: rerun_calls.append("fragment"),
+    )
+
+    page._render_three_payload(
+        container=_DummyContainer(),
+        payload={"lines": [], "points": [], "meshes": [], "labels": [], "legend": []},
+        height=420,
+    )
+
+    assert rerun_calls == ["fragment"]
+
+
 def test_render_three_payload_reuses_augmented_payload_for_same_inputs(monkeypatch) -> None:
     page = wt_import_module
     page.st.session_state.clear()

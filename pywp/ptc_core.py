@@ -1336,7 +1336,13 @@ def _render_three_payload(
             ),
         )
     if _handle_three_edit_event(edit_event):
-        st.rerun()
+        # The results and run sections are rendered inside Streamlit fragments.
+        # A local 3D edit must refresh only that fragment; a full app rerun
+        # resets unrelated widget/layout state and causes visible scroll/focus
+        # jumps.  _rerun_fragment keeps the compatibility fallback for callers
+        # that render this helper outside a fragment (e.g. older Streamlit or
+        # isolated tests).
+        _rerun_fragment()
 
 
 def _build_edit_wells_payload(
@@ -2248,7 +2254,7 @@ def _trajectory_hover_customdata(stations: pd.DataFrame) -> np.ndarray:
     return customdata
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=16)
 def _parse_welltrack_cached(text: str) -> list[WelltrackRecord]:
     return parse_welltrack_text(text)
 
@@ -2688,6 +2694,7 @@ def _apply_edit_pad_changes(
 
     pad_by_id = {str(pad.pad_id): pad for pad in pads}
     raw_configs = st.session_state.setdefault("wt_pad_configs", {})
+    changed_pad_ids: set[str] = set()
     updated_any = False
 
     for raw_change in changes:
@@ -2704,7 +2711,23 @@ def _apply_edit_pad_changes(
             continue
         if not all(np.isfinite(anchor_xyz)):
             continue
-        next_cfg = dict(raw_configs.get(pad_id) or {})
+        current_cfg_raw = raw_configs.get(pad_id)
+        current_cfg = (
+            current_cfg_raw
+            if isinstance(current_cfg_raw, Mapping)
+            else _pad_config_for_ui(pad)
+        )
+        anchor_changed = any(
+            abs(
+                float(current_cfg.get(key, anchor_xyz[index]))
+                - float(anchor_xyz[index])
+            )
+            > 1e-9
+            for index, key in enumerate(
+                ("first_surface_x", "first_surface_y", "first_surface_z")
+            )
+        )
+        next_cfg = dict(current_cfg)
         next_cfg["first_surface_x"] = float(anchor_xyz[0])
         next_cfg["first_surface_y"] = float(anchor_xyz[1])
         next_cfg["first_surface_z"] = float(anchor_xyz[2])
@@ -2712,10 +2735,18 @@ def _apply_edit_pad_changes(
         nds_updated = False
         if raw_nds is not None:
             try:
-                next_cfg["nds_azimuth_deg"] = float(raw_nds) % 360.0
-                nds_updated = True
+                normalized_nds = float(raw_nds)
+                if np.isfinite(normalized_nds):
+                    normalized_nds %= 360.0
+                    current_nds = float(
+                        current_cfg.get("nds_azimuth_deg", normalized_nds)
+                    ) % 360.0
+                    nds_updated = abs(current_nds - normalized_nds) > 1e-9
+                    next_cfg["nds_azimuth_deg"] = normalized_nds
             except (TypeError, ValueError):
                 pass
+        if not anchor_changed and not nds_updated:
+            continue
         next_cfg[ptc_pad_state.WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY] = True
         raw_configs[pad_id] = next_cfg
         st.session_state[f"wt_pad_cfg_first_surface_x_{pad_id}"] = float(
@@ -2731,17 +2762,29 @@ def _apply_edit_pad_changes(
             st.session_state[f"wt_pad_cfg_nds_azimuth_deg_{pad_id}"] = float(
                 next_cfg["nds_azimuth_deg"]
             ) % 360.0
+        changed_pad_ids.add(pad_id)
         updated_any = True
 
     if not updated_any:
         return []
 
+    changed_pads = [pad for pad in pads if str(pad.pad_id) in changed_pad_ids]
+    changed_parent_keys = {
+        pilot_parent_key_for_record(well)
+        for pad in changed_pads
+        for well in pad.wells
+    }
     updated_records = sync_pilot_surfaces_to_parents(
         apply_pad_layout(
             records=working_records,
-            pads=pads,
-            plan_by_pad_id=_build_pad_plan_map(pads),
-        )
+            pads=changed_pads,
+            plan_by_pad_id={
+                str(pad_id): plan
+                for pad_id, plan in _build_pad_plan_map(pads).items()
+                if str(pad_id) in changed_pad_ids
+            },
+        ),
+        only_parent_keys=changed_parent_keys,
     )
     st.session_state["wt_records"] = list(updated_records)
     st.session_state["wt_pad_last_applied_at"] = datetime.now().strftime(

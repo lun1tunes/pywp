@@ -1,3 +1,144 @@
+    reduced_seed = np.asarray(
+        [float(seed[index]) for index in free_indices], dtype=float
+    )
+
+    def expand_reduced(values_reduced: np.ndarray) -> np.ndarray:
+        full = seed.copy()
+        for index, value in fixed.items():
+            full[index] = float(value)
+        for reduced_index, free_index in enumerate(free_indices):
+            full[free_index] = float(values_reduced[reduced_index])
+        return _apply_fixed_search_components_to_vector(
+            vector=full,
+            bounds=bounds,
+            fixed_components=fixed,
+        )
+
+    constraints = [
+        {
+            "type": "ineq",
+            "fun": (
+                lambda values_reduced, fn=constraint_fn: fn(
+                    expand_reduced(np.asarray(values_reduced, dtype=float))
+                )
+            ),
+        }
+        for constraint_fn in constraint_functions
+    ]
+    result = minimize(
+        fun=lambda values_reduced: objective(
+            expand_reduced(np.asarray(values_reduced, dtype=float))
+        ),
+        x0=reduced_seed,
+        method="SLSQP",
+        bounds=list(reduced_bounds),
+        constraints=constraints,
+        options={
+            "maxiter": int(maxiter),
+            "ftol": 1e-8,
+            "disp": False,
+        },
+    )
+
+    probes = [expand_reduced(reduced_seed)]
+    if bool(result.success) and np.all(np.isfinite(result.x)):
+        probes.append(expand_reduced(np.asarray(result.x, dtype=float)))
+    return _dedupe_seed_vectors(probes)
+
+
+def _split_build_rescue_seed_vectors(
+    *,
+    base_seed_vectors: list[np.ndarray],
+    geometry: SectionGeometry,
+    bounds: tuple[tuple[float, float], ...],
+    search_settings: TurnSearchSettings,
+    build_dls_upper_deg_per_30m: float,
+) -> list[np.ndarray]:
+    seeds: list[np.ndarray] = []
+    for seed in base_seed_vectors:
+        if len(seed) < 5:
+            continue
+        build_unit = float(seed[0])
+        rest = np.asarray(seed[1:], dtype=float)
+        seeds.extend(
+            [
+                np.r_[build_unit, build_unit, rest],
+                np.r_[1.0, build_unit, rest],
+                np.r_[build_unit, 1.0, rest],
+                np.r_[1.0, 0.8, rest],
+                np.r_[0.8, 1.0, rest],
+            ]
+        )
+    build_units = _build_unit_seed_values(search_settings=search_settings)
+    for seed in _deep_low_angle_turn_seed_vectors(
+        geometry=geometry,
+        build_units=build_units,
+        bounds=bounds,
+        build_dls_upper_deg_per_30m=build_dls_upper_deg_per_30m,
+    ):
+        build_unit = float(seed[0])
+        rest = np.asarray(seed[1:], dtype=float)
+        seeds.extend(
+            [
+                np.r_[build_unit, build_unit, rest],
+                np.r_[1.0, build_unit, rest],
+                np.r_[build_unit, 1.0, rest],
+            ]
+        )
+    return _dedupe_seed_vectors(seeds)[:SPLIT_BUILD_RESCUE_MAX_STARTS]
+
+
+def _collect_zero_azimuth_split_build_candidates(
+    *,
+    geometry: SectionGeometry,
+    build_dls_lower_deg_per_30m: float,
+    build_dls_upper_deg_per_30m: float,
+    build2_dls_upper_deg_per_30m: float | None,
+    post_entry: PostEntrySection,
+    target_point: np.ndarray,
+    config: TrajectoryConfig,
+    search_settings: TurnSearchSettings,
+) -> tuple[list[ProfileParameters], tuple[float, float, float, float]]:
+    resolved_build2_upper = (
+        float(build_dls_upper_deg_per_30m)
+        if build2_dls_upper_deg_per_30m is None
+        else float(build2_dls_upper_deg_per_30m)
+    )
+    if (
+        max(float(build_dls_upper_deg_per_30m), resolved_build2_upper)
+        <= build_dls_lower_deg_per_30m + SMALL
+    ):
+        return [], (
+            np.inf,
+            np.inf,
+            np.inf,
+            float(max(build_dls_upper_deg_per_30m, resolved_build2_upper)),
+        )
+
+    build1_values = list(
+        _preferred_build_dls_values(
+            lower_dls_deg_per_30m=build_dls_lower_deg_per_30m,
+            upper_dls_deg_per_30m=build_dls_upper_deg_per_30m,
+        )
+    )
+    build2_values = list(
+        _preferred_build_dls_values(
+            lower_dls_deg_per_30m=build_dls_lower_deg_per_30m,
+            upper_dls_deg_per_30m=resolved_build2_upper,
+        )
+    )
+    for unit_value in _build_unit_seed_values(search_settings):
+        build1_values.append(
+            _decode_build_dls_from_unit(
+                unit_value=float(unit_value),
+                lower_dls_deg_per_30m=build_dls_lower_deg_per_30m,
+                upper_dls_deg_per_30m=build_dls_upper_deg_per_30m,
+            )
+        )
+        build2_values.append(
+            _decode_build_dls_from_unit(
+                unit_value=float(unit_value),
+                lower_dls_deg_per_30m=build_dls_lower_deg_per_30m,
                 upper_dls_deg_per_30m=resolved_build2_upper,
             )
         )
@@ -7097,7 +7238,7 @@ def _as_selection_list(value: object) -> list[object]:
     return []
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_core.py	384121
+===BEGIN_FILE===	pywp/ptc_core.py	386733
 from __future__ import annotations
 
 import colorsys
@@ -8436,7 +8577,13 @@ def _render_three_payload(
             ),
         )
     if _handle_three_edit_event(edit_event):
-        st.rerun()
+        # The results and run sections are rendered inside Streamlit fragments.
+        # A local 3D edit must refresh only that fragment; a full app rerun
+        # resets unrelated widget/layout state and causes visible scroll/focus
+        # jumps.  _rerun_fragment keeps the compatibility fallback for callers
+        # that render this helper outside a fragment (e.g. older Streamlit or
+        # isolated tests).
+        _rerun_fragment()
 
 
 def _build_edit_wells_payload(
@@ -9348,7 +9495,7 @@ def _trajectory_hover_customdata(stations: pd.DataFrame) -> np.ndarray:
     return customdata
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=16)
 def _parse_welltrack_cached(text: str) -> list[WelltrackRecord]:
     return parse_welltrack_text(text)
 
@@ -9684,7 +9831,21 @@ def _queue_surface_edit_feedback(
             if parsed_indices:
                 existing_highlight_points[well_name] = parsed_indices
 
-    _clear_results()
+    # A pad edit invalidates only the wells whose surface actually moved.
+    # Keep the anti-collision snapshot and its per-well/pair caches: the next
+    # targeted trajectory run must be able to reuse every untouched pad.
+    current_records = list(st.session_state.get("wt_records") or [])
+    if current_records:
+        ptc_edit_targets.invalidate_results_for_edited_targets(
+            st.session_state,
+            records=current_records,
+            edited_names=changed_names,
+            base_row_factory=WelltrackBatchPlanner._base_row,
+        )
+    st.session_state["wt_last_error"] = ""
+    st.session_state["wt_last_run_at"] = ""
+    st.session_state["wt_last_runtime_s"] = None
+    st.session_state["wt_last_run_log_lines"] = []
     pending_names = _unique_well_names(
         [*existing_highlighted_names, *changed_names]
     )
@@ -9708,6 +9869,7 @@ def _queue_surface_edit_feedback(
     st.session_state["wt_edit_targets_last_source"] = source
     st.session_state.pop("wt_edit_targets_applied_note", None)
     st.session_state["wt_pending_selected_names"] = list(pending_names)
+    _queue_all_wells_results_focus()
     return changed_names
 
 
@@ -9773,6 +9935,7 @@ def _apply_edit_pad_changes(
 
     pad_by_id = {str(pad.pad_id): pad for pad in pads}
     raw_configs = st.session_state.setdefault("wt_pad_configs", {})
+    changed_pad_ids: set[str] = set()
     updated_any = False
 
     for raw_change in changes:
@@ -9789,7 +9952,23 @@ def _apply_edit_pad_changes(
             continue
         if not all(np.isfinite(anchor_xyz)):
             continue
-        next_cfg = dict(raw_configs.get(pad_id) or {})
+        current_cfg_raw = raw_configs.get(pad_id)
+        current_cfg = (
+            current_cfg_raw
+            if isinstance(current_cfg_raw, Mapping)
+            else _pad_config_for_ui(pad)
+        )
+        anchor_changed = any(
+            abs(
+                float(current_cfg.get(key, anchor_xyz[index]))
+                - float(anchor_xyz[index])
+            )
+            > 1e-9
+            for index, key in enumerate(
+                ("first_surface_x", "first_surface_y", "first_surface_z")
+            )
+        )
+        next_cfg = dict(current_cfg)
         next_cfg["first_surface_x"] = float(anchor_xyz[0])
         next_cfg["first_surface_y"] = float(anchor_xyz[1])
         next_cfg["first_surface_z"] = float(anchor_xyz[2])
@@ -9797,10 +9976,18 @@ def _apply_edit_pad_changes(
         nds_updated = False
         if raw_nds is not None:
             try:
-                next_cfg["nds_azimuth_deg"] = float(raw_nds) % 360.0
-                nds_updated = True
+                normalized_nds = float(raw_nds)
+                if np.isfinite(normalized_nds):
+                    normalized_nds %= 360.0
+                    current_nds = float(
+                        current_cfg.get("nds_azimuth_deg", normalized_nds)
+                    ) % 360.0
+                    nds_updated = abs(current_nds - normalized_nds) > 1e-9
+                    next_cfg["nds_azimuth_deg"] = normalized_nds
             except (TypeError, ValueError):
                 pass
+        if not anchor_changed and not nds_updated:
+            continue
         next_cfg[ptc_pad_state.WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY] = True
         raw_configs[pad_id] = next_cfg
         st.session_state[f"wt_pad_cfg_first_surface_x_{pad_id}"] = float(
@@ -9816,17 +10003,29 @@ def _apply_edit_pad_changes(
             st.session_state[f"wt_pad_cfg_nds_azimuth_deg_{pad_id}"] = float(
                 next_cfg["nds_azimuth_deg"]
             ) % 360.0
+        changed_pad_ids.add(pad_id)
         updated_any = True
 
     if not updated_any:
         return []
 
+    changed_pads = [pad for pad in pads if str(pad.pad_id) in changed_pad_ids]
+    changed_parent_keys = {
+        pilot_parent_key_for_record(well)
+        for pad in changed_pads
+        for well in pad.wells
+    }
     updated_records = sync_pilot_surfaces_to_parents(
         apply_pad_layout(
             records=working_records,
-            pads=pads,
-            plan_by_pad_id=_build_pad_plan_map(pads),
-        )
+            pads=changed_pads,
+            plan_by_pad_id={
+                str(pad_id): plan
+                for pad_id, plan in _build_pad_plan_map(pads).items()
+                if str(pad_id) in changed_pad_ids
+            },
+        ),
+        only_parent_keys=changed_parent_keys,
     )
     st.session_state["wt_records"] = list(updated_records)
     st.session_state["wt_pad_last_applied_at"] = datetime.now().strftime(
@@ -20186,7 +20385,7 @@ def _merge_pad_config(
     }
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_page.py	7796
+===BEGIN_FILE===	pywp/ptc_page.py	8013
 from __future__ import annotations
 
 import logging
@@ -20207,6 +20406,7 @@ from pywp.coordinate_integration import (
     get_input_crs,
     get_selected_crs,
     render_crs_sidebar,
+    render_input_crs_section,
     should_auto_convert,
 )
 from pywp.ptc_page_import import render_target_import_section
@@ -20318,6 +20518,12 @@ def run_page() -> None:
 
     render_crs_sidebar()
     apply_page_style(max_width_px=1700)
+
+    st.markdown("## 0. Выбор системы координат")
+    st.caption(
+        "Выберите ту систему координат, которая используется в вашей ГМ/ГДМ модели"
+    )
+    render_input_crs_section()
 
     _render_target_import_section_fragment()
     edit_applied = st.session_state.pop("wt_edit_targets_applied", None)
@@ -26828,207 +27034,3 @@ def anticollision_three_payload(
             str(render_mode).strip() != WT_3D_RENDER_FAST or not is_reference_only
         ):
             terminal_ring = np.asarray(overlay.samples[-1].ring_xyz, dtype=float)
-            _append_line_segments(
-                payload,
-                segments=[_points_from_xyz_array(terminal_ring)],
-                name=f"{well_label}: граница конуса",
-                color=_lighten_hex(str(well.color), 0.55),
-                opacity=0.72,
-                dash="solid",
-                role="cone_tip",
-            )
-            _append_arrays(x_arrays, y_arrays, z_arrays, terminal_ring)
-            if focus_arrays is not None:
-                _append_arrays(*focus_arrays, terminal_ring)
-
-        stations = _maybe_decimated_stations(
-            well.stations,
-            render_mode=render_mode,
-            target_points=(
-                WT_3D_FAST_REFERENCE_TARGET_POINTS
-                if is_reference_only
-                else WT_3D_FAST_CALC_TARGET_POINTS
-            ),
-        )
-        _append_station_line(
-            payload,
-            stations=stations,
-            name=well_label,
-            color=str(well.color),
-            width_role="line",
-            hover_name=_reference_hover_name(well) if is_reference_only else well_label,
-            hover_role="reference_hover" if is_reference_only else "trajectory_hover",
-            x_arrays=x_arrays,
-            y_arrays=y_arrays,
-            z_arrays=z_arrays,
-            focus_arrays=focus_arrays,
-        )
-        if not is_reference_only:
-            _append_unique_legend_item(
-                payload,
-                label=well_label,
-                color=str(well.color),
-                opacity=1.0,
-            )
-        previous_success = (previous_successes_by_name or {}).get(well_name)
-        if previous_success is not None and not previous_success.stations.empty:
-            _append_station_line(
-                payload,
-                stations=previous_success.stations,
-                name=f"{well_name}: до пересчёта",
-                color=str(well.color),
-                opacity=0.78,
-                width_role="line",
-                dash="dot",
-                hover_name=f"{well_name}: до пересчёта",
-                x_arrays=x_arrays,
-                y_arrays=y_arrays,
-                z_arrays=z_arrays,
-                focus_arrays=focus_arrays,
-            )
-        if (well.t1 is not None) and (well.t3 is not None) and not is_reference_only:
-            pilot_points = (
-                _pilot_study_points_for_well(
-                    well_name,
-                    pilot_points_map,
-                    fallback_points=(well.t1, well.t3),
-                )
-                if is_pilot
-                else ()
-            )
-            _append_target_markers(
-                payload,
-                name=f"{well_label}: цели",
-                surface=well.surface,
-                t1=well.t1,
-                t3=well.t3,
-                target_pairs=tuple(getattr(well, "target_pairs", ()) or ()),
-                target_points=pilot_points,
-                target_labels=_pilot_study_label_texts(
-                    well_name,
-                    len(pilot_points),
-                )
-                if is_pilot
-                else (),
-                color=str(well.color),
-                size=5.0,
-                symbol="circle",
-                x_arrays=x_arrays,
-                y_arrays=y_arrays,
-                z_arrays=z_arrays,
-                focus_arrays=focus_arrays,
-            )
-            if pilot_points:
-                _append_pilot_study_labels(
-                    payload,
-                    pilot_name=well_name,
-                    study_points=pilot_points,
-                    color=str(well.color),
-                )
-            payload["labels"].append(
-                _well_name_label(display_name, well.t3, str(well.color))
-            )
-
-    for target_only in target_only_wells or ():
-        well_name = str(getattr(target_only, "name"))
-        color = color_map.get(well_name, "#6B7280")
-        target_points = tuple(getattr(target_only, "target_points", ()) or ())
-        target_labels = tuple(getattr(target_only, "target_labels", ()) or ())
-        target_focus_arrays = (
-            (x_focus_arrays, y_focus_arrays, z_focus_arrays)
-            if _include_target_only_in_focus(
-                well_name=well_name,
-                focus_set=focus_set,
-                target_points=target_points,
-                target_labels=target_labels,
-            )
-            else None
-        )
-        _append_target_markers(
-            payload,
-            name=f"{well_name}: цели (без траектории)",
-            surface=getattr(target_only, "surface"),
-            t1=getattr(target_only, "t1"),
-            t3=getattr(target_only, "t3"),
-            target_pairs=tuple(getattr(target_only, "target_pairs", ()) or ()),
-            target_points=target_points,
-            target_labels=target_labels,
-            color=color,
-            size=10.0,
-            symbol="cross",
-            x_arrays=x_arrays,
-            y_arrays=y_arrays,
-            z_arrays=z_arrays,
-            focus_arrays=target_focus_arrays,
-            hover_extra={
-                "status": str(getattr(target_only, "status", "") or ""),
-                "problem": str(getattr(target_only, "problem", "") or ""),
-            },
-        )
-        payload["labels"].append(
-            _well_name_label(well_name, getattr(target_only, "t3"), color)
-        )
-        _append_unique_legend_item(
-            payload,
-            label=f"{well_name}: цели (без траектории)",
-            color=color,
-            opacity=1.0,
-            symbol="point",
-        )
-
-    if aggregated_reference_wells:
-        _append_combined_reference_wells(
-            payload,
-            reference_wells=aggregated_reference_wells,
-            x_arrays=x_arrays,
-            y_arrays=y_arrays,
-            z_arrays=z_arrays,
-        )
-    _append_reference_legend(payload, analysis_reference_objects)
-    analysis_reference_wells = _analysis_reference_wells(analysis)
-    display_only_reference_wells = _display_only_reference_wells(
-        reference_wells=loaded_reference_wells,
-        analysis_reference_wells=analysis_reference_wells,
-    )
-    if display_only_reference_wells:
-        _append_reference_wells(
-            payload,
-            reference_wells=display_only_reference_wells,
-            render_mode=render_mode,
-            x_arrays=x_arrays,
-            y_arrays=y_arrays,
-            z_arrays=z_arrays,
-        )
-    _append_reference_name_labels(payload, analysis_reference_wells)
-    _append_reference_pad_labels(payload, analysis_reference_wells)
-    default_loaded_reference_label_keys = {
-        _reference_identity_key(well)
-        for well in analysis_reference_wells
-    }
-    if str(render_mode).strip() != WT_3D_RENDER_FAST:
-        default_loaded_reference_label_keys.update(
-            _reference_identity_key(well) for well in display_only_reference_wells
-        )
-    _set_optional_reference_name_labels(
-        payload,
-        [
-            well
-            for well in loaded_reference_wells
-            if _reference_identity_key(well) not in default_loaded_reference_label_keys
-        ],
-    )
-    _append_sidetrack_relative_cone_overlays(
-        payload,
-        analysis=analysis,
-        x_arrays=x_arrays,
-        y_arrays=y_arrays,
-        z_arrays=z_arrays,
-        focus_arrays=(x_focus_arrays, y_focus_arrays, z_focus_arrays),
-        focus_set=focus_set,
-    )
-
-    for corridor in analysis.corridors:
-        overlap_rings = _valid_overlap_rings(corridor.overlap_rings_xyz)
-        if not overlap_rings:
-            continue
-        stacked = np.vstack(overlap_rings)

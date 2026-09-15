@@ -1,3 +1,207 @@
+            _append_line_segments(
+                payload,
+                segments=[_points_from_xyz_array(terminal_ring)],
+                name=f"{well_label}: граница конуса",
+                color=_lighten_hex(str(well.color), 0.55),
+                opacity=0.72,
+                dash="solid",
+                role="cone_tip",
+            )
+            _append_arrays(x_arrays, y_arrays, z_arrays, terminal_ring)
+            if focus_arrays is not None:
+                _append_arrays(*focus_arrays, terminal_ring)
+
+        stations = _maybe_decimated_stations(
+            well.stations,
+            render_mode=render_mode,
+            target_points=(
+                WT_3D_FAST_REFERENCE_TARGET_POINTS
+                if is_reference_only
+                else WT_3D_FAST_CALC_TARGET_POINTS
+            ),
+        )
+        _append_station_line(
+            payload,
+            stations=stations,
+            name=well_label,
+            color=str(well.color),
+            width_role="line",
+            hover_name=_reference_hover_name(well) if is_reference_only else well_label,
+            hover_role="reference_hover" if is_reference_only else "trajectory_hover",
+            x_arrays=x_arrays,
+            y_arrays=y_arrays,
+            z_arrays=z_arrays,
+            focus_arrays=focus_arrays,
+        )
+        if not is_reference_only:
+            _append_unique_legend_item(
+                payload,
+                label=well_label,
+                color=str(well.color),
+                opacity=1.0,
+            )
+        previous_success = (previous_successes_by_name or {}).get(well_name)
+        if previous_success is not None and not previous_success.stations.empty:
+            _append_station_line(
+                payload,
+                stations=previous_success.stations,
+                name=f"{well_name}: до пересчёта",
+                color=str(well.color),
+                opacity=0.78,
+                width_role="line",
+                dash="dot",
+                hover_name=f"{well_name}: до пересчёта",
+                x_arrays=x_arrays,
+                y_arrays=y_arrays,
+                z_arrays=z_arrays,
+                focus_arrays=focus_arrays,
+            )
+        if (well.t1 is not None) and (well.t3 is not None) and not is_reference_only:
+            pilot_points = (
+                _pilot_study_points_for_well(
+                    well_name,
+                    pilot_points_map,
+                    fallback_points=(well.t1, well.t3),
+                )
+                if is_pilot
+                else ()
+            )
+            _append_target_markers(
+                payload,
+                name=f"{well_label}: цели",
+                surface=well.surface,
+                t1=well.t1,
+                t3=well.t3,
+                target_pairs=tuple(getattr(well, "target_pairs", ()) or ()),
+                target_points=pilot_points,
+                target_labels=_pilot_study_label_texts(
+                    well_name,
+                    len(pilot_points),
+                )
+                if is_pilot
+                else (),
+                color=str(well.color),
+                size=5.0,
+                symbol="circle",
+                x_arrays=x_arrays,
+                y_arrays=y_arrays,
+                z_arrays=z_arrays,
+                focus_arrays=focus_arrays,
+            )
+            if pilot_points:
+                _append_pilot_study_labels(
+                    payload,
+                    pilot_name=well_name,
+                    study_points=pilot_points,
+                    color=str(well.color),
+                )
+            payload["labels"].append(
+                _well_name_label(display_name, well.t3, str(well.color))
+            )
+
+    for target_only in target_only_wells or ():
+        well_name = str(getattr(target_only, "name"))
+        color = color_map.get(well_name, "#6B7280")
+        target_points = tuple(getattr(target_only, "target_points", ()) or ())
+        target_labels = tuple(getattr(target_only, "target_labels", ()) or ())
+        target_focus_arrays = (
+            (x_focus_arrays, y_focus_arrays, z_focus_arrays)
+            if _include_target_only_in_focus(
+                well_name=well_name,
+                focus_set=focus_set,
+                target_points=target_points,
+                target_labels=target_labels,
+            )
+            else None
+        )
+        _append_target_markers(
+            payload,
+            name=f"{well_name}: цели (без траектории)",
+            surface=getattr(target_only, "surface"),
+            t1=getattr(target_only, "t1"),
+            t3=getattr(target_only, "t3"),
+            target_pairs=tuple(getattr(target_only, "target_pairs", ()) or ()),
+            target_points=target_points,
+            target_labels=target_labels,
+            color=color,
+            size=10.0,
+            symbol="cross",
+            x_arrays=x_arrays,
+            y_arrays=y_arrays,
+            z_arrays=z_arrays,
+            focus_arrays=target_focus_arrays,
+            hover_extra={
+                "status": str(getattr(target_only, "status", "") or ""),
+                "problem": str(getattr(target_only, "problem", "") or ""),
+            },
+        )
+        payload["labels"].append(
+            _well_name_label(well_name, getattr(target_only, "t3"), color)
+        )
+        _append_unique_legend_item(
+            payload,
+            label=f"{well_name}: цели (без траектории)",
+            color=color,
+            opacity=1.0,
+            symbol="point",
+        )
+
+    if aggregated_reference_wells:
+        _append_combined_reference_wells(
+            payload,
+            reference_wells=aggregated_reference_wells,
+            x_arrays=x_arrays,
+            y_arrays=y_arrays,
+            z_arrays=z_arrays,
+        )
+    _append_reference_legend(payload, analysis_reference_objects)
+    analysis_reference_wells = _analysis_reference_wells(analysis)
+    display_only_reference_wells = _display_only_reference_wells(
+        reference_wells=loaded_reference_wells,
+        analysis_reference_wells=analysis_reference_wells,
+    )
+    if display_only_reference_wells:
+        _append_reference_wells(
+            payload,
+            reference_wells=display_only_reference_wells,
+            render_mode=render_mode,
+            x_arrays=x_arrays,
+            y_arrays=y_arrays,
+            z_arrays=z_arrays,
+        )
+    _append_reference_name_labels(payload, analysis_reference_wells)
+    _append_reference_pad_labels(payload, analysis_reference_wells)
+    default_loaded_reference_label_keys = {
+        _reference_identity_key(well)
+        for well in analysis_reference_wells
+    }
+    if str(render_mode).strip() != WT_3D_RENDER_FAST:
+        default_loaded_reference_label_keys.update(
+            _reference_identity_key(well) for well in display_only_reference_wells
+        )
+    _set_optional_reference_name_labels(
+        payload,
+        [
+            well
+            for well in loaded_reference_wells
+            if _reference_identity_key(well) not in default_loaded_reference_label_keys
+        ],
+    )
+    _append_sidetrack_relative_cone_overlays(
+        payload,
+        analysis=analysis,
+        x_arrays=x_arrays,
+        y_arrays=y_arrays,
+        z_arrays=z_arrays,
+        focus_arrays=(x_focus_arrays, y_focus_arrays, z_focus_arrays),
+        focus_set=focus_set,
+    )
+
+    for corridor in analysis.corridors:
+        overlap_rings = _valid_overlap_rings(corridor.overlap_rings_xyz)
+        if not overlap_rings:
+            continue
+        stacked = np.vstack(overlap_rings)
         _append_arrays(x_arrays, y_arrays, z_arrays, stacked)
         if (not focus_set) or bool({str(corridor.well_a), str(corridor.well_b)} & focus_set):
             _append_arrays(x_focus_arrays, y_focus_arrays, z_focus_arrays, stacked)
@@ -4379,7 +4583,7 @@ def _coerce_table_float(value: object, *, field_name: str, row_no: int) -> float
     return number
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/segments.py	8135
+===BEGIN_FILE===	pywp/segments.py	13550
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -4393,18 +4597,69 @@ from pywp.mcm import dogleg_angle_rad
 INTERPOLATION_SLERP = "slerp"
 INTERPOLATION_RODRIGUES = "rodrigues"
 DEFAULT_INTERPOLATION_METHOD = INTERPOLATION_RODRIGUES
+MAX_MD_GRID_STATIONS = 1_000_000
+
+
+def _finite_float(value: object, *, name: str) -> float:
+    try:
+        normalized = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a number") from exc
+    if not np.isfinite(normalized):
+        raise ValueError(f"{name} must be finite")
+    return normalized
+
+
+def _non_negative_length(value: object) -> float:
+    normalized = _finite_float(value, name="length_m")
+    if normalized < 0.0:
+        raise ValueError("length_m must be non-negative")
+    return normalized
+
+
+def _inclination_deg(value: object, *, name: str) -> float:
+    normalized = _finite_float(value, name=name)
+    if not 0.0 <= normalized <= 180.0:
+        raise ValueError(f"{name} must be in the range [0, 180] degrees")
+    return normalized
 
 
 def _make_md_grid(md_start: float, length_m: float, md_step_m: float) -> np.ndarray:
-    if length_m <= 1e-9:
+    try:
+        md_start = float(md_start)
+        length_m = float(length_m)
+        md_step_m = float(md_step_m)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("md_start, length_m and md_step_m must be numbers") from exc
+    if not all(np.isfinite(value) for value in (md_start, length_m, md_step_m)):
+        raise ValueError("md_start, length_m and md_step_m must be finite")
+    if length_m < 0.0:
+        raise ValueError("length_m must be non-negative")
+    if md_step_m <= 0.0:
+        raise ValueError("md_step_m must be greater than zero")
+    if length_m == 0.0:
         return np.array([md_start], dtype=float)
 
     md_end = md_start + float(length_m)
+    if not np.isfinite(md_end) or md_end <= md_start:
+        raise ValueError(
+            "md_start + length_m must be a finite value greater than md_start"
+        )
+    estimated_intervals = length_m / md_step_m
+    if not np.isfinite(estimated_intervals):
+        raise ValueError(
+            f"MD grid would contain more than {MAX_MD_GRID_STATIONS:,} stations"
+        )
+    estimated_station_count = int(np.ceil(estimated_intervals)) + 1
+    if estimated_station_count > MAX_MD_GRID_STATIONS:
+        raise ValueError(
+            f"MD grid would contain more than {MAX_MD_GRID_STATIONS:,} stations"
+        )
     md = np.arange(md_start, md_end, md_step_m, dtype=float)
-    if len(md) == 0 or abs(float(md[-1]) - float(md_end)) > 1e-9:
-        md = np.append(md, md_end)
-    else:
-        md[-1] = md_end
+    md = md[md < md_end]
+    md = np.append(md, md_end)
+    if len(md) > 1 and np.any(np.diff(md) <= 0.0):
+        raise ValueError("md_step_m is too small to produce distinct MD stations")
     return md
 
 
@@ -4423,8 +4678,8 @@ class Segment(ABC):
 
 class VerticalSegment(Segment):
     def __init__(self, length_m: float, azi_deg: float = 0.0, name: str = "VERTICAL"):
-        self._length_m = float(max(length_m, 0.0))
-        self.azi_deg = float(azi_deg)
+        self._length_m = _non_negative_length(length_m)
+        self.azi_deg = _finite_float(azi_deg, name="azi_deg")
         self.name = name
 
     @property
@@ -4445,9 +4700,9 @@ class VerticalSegment(Segment):
 
 class HoldSegment(Segment):
     def __init__(self, length_m: float, inc_deg: float, azi_deg: float, name: str = "HOLD"):
-        self._length_m = float(max(length_m, 0.0))
-        self.inc_deg = float(inc_deg)
-        self.azi_deg = float(azi_deg)
+        self._length_m = _non_negative_length(length_m)
+        self.inc_deg = _inclination_deg(inc_deg, name="inc_deg")
+        self.azi_deg = _finite_float(azi_deg, name="azi_deg")
         self.name = name
 
     @property
@@ -4477,18 +4732,24 @@ class BuildSegment(Segment):
         name: str = "BUILD",
         interpolation_method: str = DEFAULT_INTERPOLATION_METHOD,
     ):
-        self.inc_from_deg = float(inc_from_deg)
-        self.inc_to_deg = float(inc_to_deg)
-        self.dls_deg_per_30m = float(max(dls_deg_per_30m, 0.0))
-        self.azi_from_deg = float(azi_deg)
-        self.azi_to_deg = float(azi_deg if azi_to_deg is None else azi_to_deg)
+        self.inc_from_deg = _inclination_deg(inc_from_deg, name="inc_from_deg")
+        self.inc_to_deg = _inclination_deg(inc_to_deg, name="inc_to_deg")
+        self.dls_deg_per_30m = _finite_float(
+            dls_deg_per_30m,
+            name="dls_deg_per_30m",
+        )
+        if self.dls_deg_per_30m < 0.0:
+            raise ValueError("dls_deg_per_30m must be non-negative")
+        self.azi_from_deg = _finite_float(azi_deg, name="azi_deg")
+        self.azi_to_deg = _finite_float(
+            azi_deg if azi_to_deg is None else azi_to_deg,
+            name="azi_to_deg",
+        )
         self.name = name
         self.interpolation_method = str(interpolation_method)
 
     @property
     def length_m(self) -> float:
-        if self.dls_deg_per_30m <= 0.0:
-            return 0.0
         dogleg_deg = float(
             dogleg_angle_rad(
                 self.inc_from_deg,
@@ -4498,6 +4759,12 @@ class BuildSegment(Segment):
             )
             * RAD2DEG
         )
+        if self.dls_deg_per_30m <= 0.0:
+            if dogleg_deg > 1e-12:
+                raise ValueError(
+                    "dls_deg_per_30m must be positive for a non-zero dogleg"
+                )
+            return 0.0
         return dogleg_deg / self.dls_deg_per_30m * 30.0
 
     def generate(self, md_start: float, md_step_m: float) -> pd.DataFrame:
@@ -4507,6 +4774,8 @@ class BuildSegment(Segment):
             azi = np.array([self.azi_to_deg], dtype=float)
         else:
             t = (md - md_start) / self.length_m
+            t[0] = 0.0
+            t[-1] = 1.0
             direction_from = _direction_vector(inc_deg=self.inc_from_deg, azi_deg=self.azi_from_deg)
             direction_to = _direction_vector(inc_deg=self.inc_to_deg, azi_deg=self.azi_to_deg)
             if self.interpolation_method == INTERPOLATION_SLERP:
@@ -4548,6 +4817,33 @@ def _direction_vector(inc_deg: float, azi_deg: float) -> np.ndarray:
     )
 
 
+def _unit_direction(direction: np.ndarray) -> np.ndarray:
+    vector = np.asarray(direction, dtype=float).reshape(-1)
+    if vector.size != 3 or not np.all(np.isfinite(vector)):
+        raise ValueError("Direction must be a finite three-dimensional vector")
+    norm = float(np.linalg.norm(vector))
+    if norm <= 1e-12:
+        raise ValueError("Direction vector must be non-zero")
+    return vector / norm
+
+
+def _deterministic_orthogonal_axis(direction: np.ndarray) -> np.ndarray:
+    """Return a stable rotation axis perpendicular to ``direction``.
+
+    An exactly antipodal pair of directions has infinitely many shortest
+    rotation planes.  Selecting the least-aligned Cartesian basis vector makes
+    that otherwise ambiguous case deterministic and avoids silently returning
+    a constant (and therefore wrong) direction.
+    """
+    unit = _unit_direction(direction)
+    basis = np.eye(3, dtype=float)[int(np.argmin(np.abs(unit)))]
+    axis = np.cross(unit, basis)
+    axis_norm = float(np.linalg.norm(axis))
+    if axis_norm <= 1e-12:  # Defensive; the least-aligned basis cannot be parallel.
+        raise ValueError("Unable to construct an orthogonal interpolation axis")
+    return axis / axis_norm
+
+
 def _rodrigues_directions(direction_from: np.ndarray, direction_to: np.ndarray, t: np.ndarray) -> np.ndarray:
     """Interpolate directions using Rodrigues' rotation formula.
 
@@ -4555,11 +4851,13 @@ def _rodrigues_directions(direction_from: np.ndarray, direction_to: np.ndarray, 
     because the evaluation never divides by sin(dogleg) per-point — only
     a one-time cross-product normalisation is needed.
     """
-    start = direction_from / np.linalg.norm(direction_from)
-    end = direction_to / np.linalg.norm(direction_to)
+    start = _unit_direction(direction_from)
+    end = _unit_direction(direction_to)
     dot = float(np.clip(np.dot(start, end), -1.0, 1.0))
     theta = float(np.arccos(dot))
     t_vec = np.asarray(t, dtype=float).reshape(-1)
+    if not np.all(np.isfinite(t_vec)) or np.any((t_vec < 0.0) | (t_vec > 1.0)):
+        raise ValueError("Interpolation parameters must be finite and in [0, 1]")
 
     if theta <= 1e-12:
         vectors = np.repeat(start.reshape(1, 3), len(t_vec), axis=0)
@@ -4567,8 +4865,18 @@ def _rodrigues_directions(direction_from: np.ndarray, direction_to: np.ndarray, 
         cross = np.cross(start, end)
         cross_norm = float(np.linalg.norm(cross))
         if cross_norm < 1e-10:
-            # start ≈ ±end — degenerate; fall back to constant direction.
-            vectors = np.repeat(start.reshape(1, 3), len(t_vec), axis=0)
+            if dot > 0.0:
+                vectors = np.repeat(start.reshape(1, 3), len(t_vec), axis=0)
+            else:
+                # Exactly antipodal directions need a deterministic choice of
+                # rotation plane.  A constant fallback violates the endpoint.
+                rot_axis = _deterministic_orthogonal_axis(start)
+                in_plane = np.cross(rot_axis, start)
+                angles = (t_vec * theta).reshape(-1, 1)
+                vectors = (
+                    np.cos(angles) * start[None, :]
+                    + np.sin(angles) * in_plane[None, :]
+                )
         else:
             rot_axis = cross / cross_norm
             in_plane = np.cross(rot_axis, start)
@@ -4577,27 +4885,49 @@ def _rodrigues_directions(direction_from: np.ndarray, direction_to: np.ndarray, 
 
     norms = np.linalg.norm(vectors, axis=1, keepdims=True)
     norms = np.where(norms <= 1e-12, 1.0, norms)
-    return vectors / norms
+    vectors = vectors / norms
+    # Preserve exact endpoints even when a nearly-antipodal pair is routed
+    # through the deterministic fallback axis.
+    vectors[t_vec == 0.0] = start
+    vectors[t_vec == 1.0] = end
+    return vectors
 
 
 def _slerp_directions(direction_from: np.ndarray, direction_to: np.ndarray, t: np.ndarray) -> np.ndarray:
-    start = direction_from / np.linalg.norm(direction_from)
-    end = direction_to / np.linalg.norm(direction_to)
+    start = _unit_direction(direction_from)
+    end = _unit_direction(direction_to)
     dot = float(np.clip(np.dot(start, end), -1.0, 1.0))
     theta = float(np.arccos(dot))
     t_vec = np.asarray(t, dtype=float).reshape(-1)
+    if not np.all(np.isfinite(t_vec)) or np.any((t_vec < 0.0) | (t_vec > 1.0)):
+        raise ValueError("Interpolation parameters must be finite and in [0, 1]")
 
     if theta <= 1e-12:
         vectors = np.repeat(start.reshape(1, 3), len(t_vec), axis=0)
     else:
         sin_theta = np.sin(theta)
-        w0 = np.sin((1.0 - t_vec) * theta) / sin_theta
-        w1 = np.sin(t_vec * theta) / sin_theta
-        vectors = w0[:, None] * start[None, :] + w1[:, None] * end[None, :]
+        if abs(float(sin_theta)) <= 1e-10:
+            if dot > 0.0:
+                vectors = np.repeat(start.reshape(1, 3), len(t_vec), axis=0)
+            else:
+                rot_axis = _deterministic_orthogonal_axis(start)
+                in_plane = np.cross(rot_axis, start)
+                angles = (t_vec * theta).reshape(-1, 1)
+                vectors = (
+                    np.cos(angles) * start[None, :]
+                    + np.sin(angles) * in_plane[None, :]
+                )
+        else:
+            w0 = np.sin((1.0 - t_vec) * theta) / sin_theta
+            w1 = np.sin(t_vec * theta) / sin_theta
+            vectors = w0[:, None] * start[None, :] + w1[:, None] * end[None, :]
 
     norms = np.linalg.norm(vectors, axis=1, keepdims=True)
     norms = np.where(norms <= 1e-12, 1.0, norms)
-    return vectors / norms
+    vectors = vectors / norms
+    vectors[t_vec == 0.0] = start
+    vectors[t_vec == 1.0] = end
+    return vectors
 
 
 def _angles_from_directions(directions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -7026,7 +7356,7 @@ class FastReplan {
 </html>
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/three_viewer_assets/templates/viewer_template.html	479558
+===BEGIN_FILE===	pywp/three_viewer_assets/templates/viewer_template.html	473109
 <!doctype html>
 <html lang="en">
   <head>
@@ -7593,72 +7923,6 @@ class FastReplan {
         pointer-events: none;
       }
 
-      .scene-label.edit-pad-handle-label {
-        min-width: 118px;
-        padding: 3px 5px;
-        border: none;
-        border-radius: 4px;
-        background: rgba(255,255,255,0.18);
-        box-shadow: none;
-        color: rgba(15,23,42,0.86);
-        cursor: grab;
-        font-family:
-          "SFMono-Regular",
-          ui-monospace,
-          Menlo,
-          Consolas,
-          monospace;
-        font-size: 10px;
-        font-weight: 500;
-        line-height: 1.35;
-        pointer-events: auto;
-        text-align: left;
-        transform: translate(10px, -100%);
-        transform-origin: 0 100%;
-        text-shadow:
-          0 1px 2px rgba(255,255,255,0.95),
-          0 0 7px rgba(255,255,255,0.72);
-        backdrop-filter: blur(2px);
-      }
-
-      .scene-label.edit-pad-handle-label:hover {
-        background: rgba(255,255,255,0.28);
-      }
-
-      .scene-label.edit-pad-handle-label.is-dragging {
-        cursor: grabbing;
-        background: rgba(255,255,255,0.34);
-      }
-
-      .scene-label.edit-pad-handle-label .edit-delta-head {
-        display: block;
-        margin-bottom: 3px;
-        color: rgba(15,23,42,0.86);
-        font-family:
-          Inter,
-          -apple-system,
-          BlinkMacSystemFont,
-          "Segoe UI",
-          sans-serif;
-        font-size: 11px;
-        font-weight: 700;
-      }
-
-      .scene-label.edit-pad-handle-label .edit-delta-row {
-        display: flex;
-        justify-content: space-between;
-        gap: 10px;
-        white-space: nowrap;
-      }
-
-      .scene-label.edit-pad-handle-label .edit-delta-total {
-        margin-top: 3px;
-        padding-top: 3px;
-        border-top: 1px solid rgba(15,23,42,0.12);
-        color: rgba(15,23,42,0.92);
-        font-weight: 700;
-      }
-
       .world-axis-handle {
         position: absolute;
         display: none;
@@ -7953,11 +8217,7 @@ class FastReplan {
 
       #edit-scope-selector.scope-grid {
         display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-      }
-
-      #edit-scope-selector.scope-grid .scope-btn:last-child {
-        grid-column: 1 / -1;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
       }
 
       .plane-btn,
@@ -8060,17 +8320,14 @@ class FastReplan {
         justify-content: space-between;
         gap: 10px;
         color: #475569;
-        font-family:
-          "SFMono-Regular",
-          ui-monospace,
-          Menlo,
-          Consolas,
-          monospace;
-        font-size: 11px;
+        font-family: inherit;
+        font-size: 10px;
       }
 
       .edit-pad-summary-row strong {
         color: #0f172a;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 11px;
         font-weight: 700;
       }
 
@@ -8085,19 +8342,16 @@ class FastReplan {
         position: static;
         width: auto;
         max-width: none;
-        max-height: min(46vh, 410px);
-        overflow: auto;
-        border-top: 1px solid rgba(15,23,42,0.08);
-        padding: 8px 10px 10px;
+        max-height: none;
+        overflow: visible;
+        padding: 0 10px;
         box-sizing: border-box;
-        background: rgba(248,250,252,0.62);
+        background: transparent;
         color: #334155;
       }
 
       #edit-inspector.is-visible {
-        display: flex;
-        flex-direction: column;
-        gap: 6px;
+        display: contents;
       }
 
       .edit-inspector-title {
@@ -8116,9 +8370,7 @@ class FastReplan {
         line-height: 1.3;
       }
 
-      .edit-inspector-search,
-      .edit-inspector-input,
-      .edit-inspector-select {
+      .edit-inspector-input {
         width: 100%;
         min-height: 25px;
         box-sizing: border-box;
@@ -8131,66 +8383,9 @@ class FastReplan {
         padding: 3px 6px;
       }
 
-      .edit-inspector-search:focus,
-      .edit-inspector-input:focus,
-      .edit-inspector-select:focus {
+      .edit-inspector-input:focus {
         outline: 2px solid rgba(37,99,235,0.18);
         border-color: rgba(37,99,235,0.62);
-      }
-
-      .edit-point-list {
-        display: flex;
-        flex-direction: column;
-        gap: 3px;
-        max-height: 122px;
-        overflow: auto;
-        padding: 2px;
-        border: 1px solid rgba(148,163,184,0.22);
-        border-radius: 8px;
-        background: rgba(248,250,252,0.72);
-      }
-
-      .edit-point-list-group {
-        padding: 4px 5px 2px;
-        color: #64748b;
-        font-size: 10px;
-        font-weight: 700;
-        text-transform: uppercase;
-      }
-
-      .edit-point-list-item {
-        display: grid;
-        grid-template-columns: minmax(0, 1fr) auto;
-        gap: 8px;
-        align-items: center;
-        width: 100%;
-        border: 1px solid transparent;
-        border-radius: 6px;
-        background: transparent;
-        color: #334155;
-        cursor: pointer;
-        font: inherit;
-        font-size: 11px;
-        padding: 5px 6px;
-        text-align: left;
-      }
-
-      .edit-point-list-item:hover {
-        background: rgba(37,99,235,0.07);
-      }
-
-      .edit-point-list-item.is-active {
-        border-color: rgba(37,99,235,0.36);
-        background: rgba(37,99,235,0.12);
-        color: #1d4ed8;
-        font-weight: 700;
-      }
-
-      .edit-point-list-meta {
-        color: #64748b;
-        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-        font-size: 9px;
-        white-space: nowrap;
       }
 
       .edit-inspector-section {
@@ -8207,6 +8402,42 @@ class FastReplan {
         font-weight: 700;
         letter-spacing: 0.02em;
         text-transform: uppercase;
+      }
+
+      .edit-inspector-section-head {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 8px;
+      }
+
+      .edit-inspector-selection {
+        display: inline-flex;
+        align-items: baseline;
+        justify-content: flex-end;
+        gap: 5px;
+        min-width: 0;
+        white-space: nowrap;
+        font-size: 10px;
+        line-height: 1.2;
+      }
+
+      .edit-inspector-selection-point {
+        overflow: hidden;
+        color: #2563eb;
+        font-weight: 700;
+        text-overflow: ellipsis;
+      }
+
+      .edit-inspector-selection-separator {
+        color: #cbd5e1;
+      }
+
+      .edit-inspector-selection-well {
+        overflow: hidden;
+        color: #94a3b8;
+        font-weight: 500;
+        text-overflow: ellipsis;
       }
 
       .edit-inspector-grid {
@@ -8228,9 +8459,19 @@ class FastReplan {
         font-weight: 700;
       }
 
-      .edit-inspector-actions {
-        display: flex;
-        gap: 5px;
+      .edit-inspector-value {
+        display: block;
+        min-height: 20px;
+        box-sizing: border-box;
+        padding: 3px 5px;
+        border: 1px solid rgba(148,163,184,0.14);
+        border-radius: 5px;
+        background: rgba(148,163,184,0.08);
+        color: #0f172a;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 11px;
+        text-align: right;
+        white-space: nowrap;
       }
 
       .edit-inspector-action {
@@ -8261,18 +8502,6 @@ class FastReplan {
         line-height: 1.35;
       }
 
-      .edit-preview-status {
-        display: flex;
-        align-items: flex-start;
-        gap: 6px;
-        border-radius: 7px;
-        background: rgba(245,158,11,0.1);
-        color: #92400e;
-        font-size: 10px;
-        line-height: 1.35;
-        padding: 6px 7px;
-      }
-
       .edit-pad-wells {
         display: flex;
         flex-direction: column;
@@ -8292,10 +8521,16 @@ class FastReplan {
         background: transparent;
         cursor: pointer;
         color: #475569;
-        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-        font-size: 9px;
+        font-family: inherit;
+        font-size: 10px;
         padding: 3px 4px;
         text-align: left;
+      }
+
+      .edit-pad-well-row > span {
+        color: #0f172a;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 11px;
       }
 
       .edit-pad-well-row:hover {
@@ -8304,9 +8539,15 @@ class FastReplan {
       }
 
       .edit-pad-well-row strong {
+        font-weight: 600;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
+      }
+
+      #edit-toolbox.is-pad-selection #edit-points-controls,
+      #edit-toolbox.is-pad-selection #edit-active-point-controls {
+        display: none;
       }
 
       @media (max-width: 840px) {
@@ -9061,17 +9302,15 @@ class FastReplan {
               <button class="plane-btn" data-plane="z" type="button">Ось Z</button>
             </div>
           </div>
-          <div class="edit-toolbox-section">
+          <div id="edit-points-controls" class="edit-toolbox-section">
             <div class="edit-toolbox-label">Точки</div>
             <div id="edit-scope-selector" class="scope-grid">
               <button class="scope-btn is-active" data-scope="point" type="button">Одна точка</button>
-              <button class="scope-btn" data-scope="pair" type="button">Пара t1–t3</button>
               <button class="scope-btn" data-scope="well" type="button">Все точки</button>
               <button class="scope-btn" data-scope="after" type="button">После точки</button>
-              <button class="scope-btn" data-scope="selected" type="button">Выбранные скважины</button>
             </div>
           </div>
-          <div class="edit-toolbox-section">
+          <div id="edit-active-point-controls" class="edit-toolbox-section">
             <div class="edit-toolbox-label">Активная</div>
             <div id="edit-point-selector">
               <button class="point-btn" data-point-role="t1" type="button" title="Сделать t1 активной точкой">t1</button>
@@ -9085,54 +9324,21 @@ class FastReplan {
               <button class="operation-btn" data-operation="rotate" type="button">Поворот XY</button>
             </div>
           </div>
-          <div class="edit-toolbox-section">
-            <div class="edit-toolbox-label">История</div>
-            <div class="edit-toolbox-action-row">
-              <button id="edit-undo-btn" class="edit-tool-btn" type="button" title="Отменить последнее изменение выбранной скважины">Назад</button>
-              <button id="edit-redo-btn" class="edit-tool-btn" type="button" title="Повторить отменённое изменение выбранной скважины">Вперёд</button>
-              <button id="edit-reset-btn" class="edit-tool-btn is-reset" type="button" title="Вернуть выбранную скважину к исходным точкам">Сброс</button>
+      <div id="edit-inspector">
+        <div id="edit-point-editor" class="edit-inspector-section">
+          <div class="edit-inspector-section-head">
+            <div class="edit-inspector-section-label">Текущие координаты</div>
+            <div class="edit-inspector-selection" aria-live="polite">
+              <span id="edit-current-point-name" class="edit-inspector-selection-point">—</span>
+              <span class="edit-inspector-selection-separator">·</span>
+              <span id="edit-current-well-name" class="edit-inspector-selection-well">—</span>
             </div>
           </div>
-      <div id="edit-inspector">
-        <div class="edit-inspector-title">
-          <span id="edit-inspector-title">Редактирование</span>
-          <span id="edit-selection-count"></span>
-        </div>
-        <div id="edit-inspector-selection" class="edit-inspector-subtitle">Выберите скважину или куст</div>
-        <input
-          id="edit-point-filter"
-          class="edit-inspector-search"
-          type="search"
-          autocomplete="off"
-          placeholder="Фильтр по label, MD или типу"
-        />
-        <div id="edit-point-list" class="edit-point-list"></div>
-
-        <div id="edit-point-editor" class="edit-inspector-section">
-          <div class="edit-inspector-section-label">Точка</div>
-          <div id="edit-point-editor-title" class="edit-inspector-title"></div>
-          <div id="edit-point-editor-meta" class="edit-inspector-subtitle"></div>
           <div class="edit-inspector-grid">
-            <div class="edit-inspector-field"><label for="edit-coordinate-x">X</label><input id="edit-coordinate-x" class="edit-inspector-input" type="number" step="0.01" /></div>
-            <div class="edit-inspector-field"><label for="edit-coordinate-y">Y</label><input id="edit-coordinate-y" class="edit-inspector-input" type="number" step="0.01" /></div>
-            <div class="edit-inspector-field"><label for="edit-coordinate-z">Z / TVD</label><input id="edit-coordinate-z" class="edit-inspector-input" type="number" step="0.01" /></div>
+            <div class="edit-inspector-field"><label>X</label><output id="edit-coordinate-x" class="edit-inspector-value">—</output></div>
+            <div class="edit-inspector-field"><label>Y</label><output id="edit-coordinate-y" class="edit-inspector-value">—</output></div>
+            <div class="edit-inspector-field"><label>Z</label><output id="edit-coordinate-z" class="edit-inspector-value">—</output></div>
           </div>
-          <div class="edit-inspector-grid">
-            <div class="edit-inspector-field"><label for="edit-delta-x">ΔX</label><input id="edit-delta-x" class="edit-inspector-input" type="number" step="0.01" placeholder="0" /></div>
-            <div class="edit-inspector-field"><label for="edit-delta-y">ΔY</label><input id="edit-delta-y" class="edit-inspector-input" type="number" step="0.01" placeholder="0" /></div>
-            <div class="edit-inspector-field"><label for="edit-delta-z">ΔZ</label><input id="edit-delta-z" class="edit-inspector-input" type="number" step="0.01" placeholder="0" /></div>
-          </div>
-          <div class="edit-inspector-actions">
-            <button id="edit-apply-coordinates" class="edit-inspector-action" type="button">Применить XYZ</button>
-            <button id="edit-apply-delta" class="edit-inspector-action" type="button">Применить Δ</button>
-            <select id="edit-edit-step" class="edit-inspector-select" aria-label="Шаг редактирования">
-              <option value="0.01">0,01 м</option>
-              <option value="0.1">0,1 м</option>
-              <option value="1">1 м</option>
-              <option value="10">10 м</option>
-            </select>
-          </div>
-          <div id="edit-z-note" class="edit-inspector-note"></div>
         </div>
 
         <div id="edit-sidetrack-editor" class="edit-inspector-section" style="display:none">
@@ -9156,11 +9362,16 @@ class FastReplan {
           <div id="edit-pad-well-list" class="edit-pad-wells"></div>
         </div>
 
-        <div id="edit-preview-status" class="edit-preview-status">
-          <span aria-hidden="true">●</span>
-          <span id="edit-preview-status-text">Предварительный статус появится после выбора объекта.</span>
-        </div>
       </div>
+          <div class="edit-toolbox-section">
+            <div class="edit-toolbox-label">История</div>
+            <div class="edit-toolbox-action-row">
+              <button id="edit-undo-btn" class="edit-tool-btn" type="button" title="Отменить последнее изменение выбранной скважины">Назад</button>
+              <button id="edit-redo-btn" class="edit-tool-btn" type="button" title="Повторить отменённое изменение выбранной скважины">Вперёд</button>
+              <button id="edit-reset-btn" class="edit-tool-btn is-reset" type="button" title="Вернуть выбранную скважину к исходным точкам">Сброс</button>
+              <button id="edit-cancel-btn" class="edit-tool-btn is-reset" type="button" title="Отменить все несохранённые изменения">Отмена</button>
+            </div>
+          </div>
       </div>
       </div>
       <button id="edit-save-btn" type="button">Сохранить изменения</button>
@@ -9388,6 +9599,8 @@ class FastReplan {
         let needsRender = true;
         let pointerScreen = { x: 0, y: 0, inside: false };
         let legendTreeExpanded = true;
+        let legendPanelCollapsed = false;
+        let collisionsPanelCollapsed = false;
         let interactionActive = false;
         const miniMapState = {
           expanded: false,
@@ -12836,7 +13049,6 @@ class FastReplan {
           }
 
           // --- Header: title + optional tree-toggle action + collapse button ---
-          var legendPanelCollapsed = false;
           const header = document.createElement("div");
           header.className = "legend-header";
           const title = document.createElement("div");
@@ -12848,6 +13060,8 @@ class FastReplan {
           collapseBtn.className = "legend-collapse-btn";
           collapseBtn.textContent = "\u25BC";
           collapseBtn.title = "Свернуть / развернуть";
+          legendElement.classList.toggle("is-collapsed", legendPanelCollapsed);
+          collapseBtn.classList.toggle("is-collapsed", legendPanelCollapsed);
           collapseBtn.addEventListener("click", function (e) {
             e.stopPropagation();
             legendPanelCollapsed = !legendPanelCollapsed;
@@ -12957,7 +13171,6 @@ class FastReplan {
           }
 
           // --- Header: title + count + collapse button ---
-          let collisionsPanelCollapsed = false;
           const header = document.createElement("div");
           header.className = "collisions-header";
           const title = document.createElement("div");
@@ -12972,6 +13185,11 @@ class FastReplan {
           collapseBtn.className = "collisions-collapse-btn";
           collapseBtn.textContent = "▼";
           collapseBtn.title = "Свернуть / развернуть";
+          collisionsPanelElement.classList.toggle(
+            "is-collapsed",
+            collisionsPanelCollapsed,
+          );
+          collapseBtn.classList.toggle("is-collapsed", collisionsPanelCollapsed);
           collapseBtn.addEventListener("click", function (e) {
             e.stopPropagation();
             collisionsPanelCollapsed = !collisionsPanelCollapsed;
@@ -14564,26 +14782,15 @@ class FastReplan {
         const editUndoBtn = document.getElementById("edit-undo-btn");
         const editRedoBtn = document.getElementById("edit-redo-btn");
         const editResetBtn = document.getElementById("edit-reset-btn");
+        const editCancelBtn = document.getElementById("edit-cancel-btn");
         const editSaveBtn = document.getElementById("edit-save-btn");
         const editInspector = document.getElementById("edit-inspector");
-        const editInspectorTitle = document.getElementById("edit-inspector-title");
-        const editSelectionCount = document.getElementById("edit-selection-count");
-        const editInspectorSelection = document.getElementById("edit-inspector-selection");
-        const editPointFilter = document.getElementById("edit-point-filter");
-        const editPointList = document.getElementById("edit-point-list");
         const editPointEditor = document.getElementById("edit-point-editor");
-        const editPointEditorTitle = document.getElementById("edit-point-editor-title");
-        const editPointEditorMeta = document.getElementById("edit-point-editor-meta");
+        const editCurrentPointName = document.getElementById("edit-current-point-name");
+        const editCurrentWellName = document.getElementById("edit-current-well-name");
         const editCoordinateX = document.getElementById("edit-coordinate-x");
         const editCoordinateY = document.getElementById("edit-coordinate-y");
         const editCoordinateZ = document.getElementById("edit-coordinate-z");
-        const editDeltaX = document.getElementById("edit-delta-x");
-        const editDeltaY = document.getElementById("edit-delta-y");
-        const editDeltaZ = document.getElementById("edit-delta-z");
-        const editApplyCoordinates = document.getElementById("edit-apply-coordinates");
-        const editApplyDelta = document.getElementById("edit-apply-delta");
-        const editEditStep = document.getElementById("edit-edit-step");
-        const editZNote = document.getElementById("edit-z-note");
         const editSidetrackEditor = document.getElementById("edit-sidetrack-editor");
         const editSidetrackParent = document.getElementById("edit-sidetrack-parent");
         const editSidetrackMd = document.getElementById("edit-sidetrack-md");
@@ -14599,8 +14806,6 @@ class FastReplan {
         const editPadFinalY = document.getElementById("edit-pad-final-y");
         const editPadFinalNds = document.getElementById("edit-pad-final-nds");
         const editPadWellList = document.getElementById("edit-pad-well-list");
-        const editPreviewStatus = document.getElementById("edit-preview-status");
-        const editPreviewStatusText = document.getElementById("edit-preview-status-text");
         const editWarningToast = document.getElementById("edit-warning-toast");
         const editWarningHideBtn = document.getElementById("edit-warning-hide-btn");
         const hasEditUiElements = Boolean(
@@ -14613,6 +14818,7 @@ class FastReplan {
           editUndoBtn &&
           editRedoBtn &&
           editResetBtn &&
+          editCancelBtn &&
           editSaveBtn &&
           editInspector
         );
@@ -14630,7 +14836,7 @@ class FastReplan {
 
         let editModeActive = false;
         let editPlane = "xy"; // "xy" | "z"
-        let editMoveScope = "point"; // point | pair | well | after | selected
+        let editMoveScope = "point"; // point | well | after; multi-selection follows the legend selection
         let editTransformMode = "move"; // "move" | "rotate"
         const editHandles = []; // {mesh, pickMesh, previewMesh, originalMesh, wellIndex, pointType, pointIndex, dataPos[3], guide}
         const editPadMarkers = []; // {mesh, pickMesh, originalMesh, selectionMesh, ndsArrow, rotationControl, label, padIndex, wellIndex, padLabel, pointLabel, dataPos[3], visualPos[3], ndsAzimuthDeg, spacingM, color}
@@ -14695,7 +14901,6 @@ class FastReplan {
         let editHasAnyChange = false;
         let editWarningDismissed = false;
         let selectedEditHandleIndex = null;
-        let editInspectorListKey = "";
         let editPadSummaryListKey = "";
         let editBroadcastChannel = null;
         let editSavePendingTimeoutId = null;
@@ -14739,7 +14944,11 @@ class FastReplan {
 
         function formatCoordinateMeters(value) {
           const numericValue = Number(value) || 0;
-          return `${numericValue.toFixed(1).replace(".", ",")} м`;
+          return `${numericValue.toLocaleString("ru-RU", {
+            minimumFractionDigits: 1,
+            maximumFractionDigits: 1,
+            useGrouping: true,
+          })} м`;
         }
 
         function normalizeAzimuthDeg(value) {
@@ -15356,31 +15565,6 @@ class FastReplan {
           return entries[handle.pointIndex] || null;
         }
 
-        function editPointMd(entry) {
-          if (!entry) {
-            return NaN;
-          }
-          const sidetrack = entry.sidetrackWindow || entry.sidetrack_window;
-          return Number(
-            (sidetrack && (sidetrack.valueM ?? sidetrack.value_m)) ??
-            (entry.mdM ?? entry.md_m ?? entry.md),
-          );
-        }
-
-        function editPointRoleTitle(handle) {
-          const role = String((handle && handle.pointRole) || "point");
-          if (role === "sidetrack_window") {
-            return "Окно sidetrack";
-          }
-          if (role === "t1" || role === "t3") {
-            return role;
-          }
-          if (/^\d+_t[13]$/.test(role)) {
-            return `Пласт ${role.slice(0, -3)} · ${role.slice(-2)}`;
-          }
-          return role || "Точка";
-        }
-
         function selectedEditHandleFocus(index) {
           const handle = editHandles[index];
           if (!handle || !Number.isInteger(handle.wellIndex)) {
@@ -15418,75 +15602,6 @@ class FastReplan {
           return true;
         }
 
-        function editPointListMatch(handle, filter) {
-          const entry = editPointEntryForHandle(handle);
-          const text = [
-            handle && handle.pointLabel,
-            handle && handle.pointType,
-            handle && handle.pointRole,
-            entry && entry.label,
-            Number.isFinite(editPointMd(entry)) ? editPointMd(entry).toFixed(2) : "",
-          ].join(" ").toLowerCase();
-          return !filter || text.includes(filter);
-        }
-
-        function renderEditPointList() {
-          if (!editPointList) {
-            return;
-          }
-          const filter = String((editPointFilter && editPointFilter.value) || "")
-            .trim().toLowerCase();
-          const listKey = `${selectedEditWellIndex}|${filter}|${selectedEditHandleIndex}|${selectedEditPadIndex}`;
-          if (listKey === editInspectorListKey) {
-            return;
-          }
-          editInspectorListKey = listKey;
-          editPointList.replaceChildren();
-          if (Number.isInteger(selectedEditPadIndex) || !Number.isInteger(selectedEditWellIndex)) {
-            return;
-          }
-          const handles = editHandles.filter(
-            (handle) => handle && handle.wellIndex === selectedEditWellIndex && editPointListMatch(handle, filter),
-          );
-          let group = "";
-          handles.forEach((handle) => {
-            const groupTitle = editPointRoleTitle(handle).startsWith("Пласт")
-              ? "ЗБС / пласты"
-              : handle.pointRole === "sidetrack_window" ? "Sidetrack" : "Точки целей";
-            if (group !== groupTitle) {
-              group = groupTitle;
-              const groupNode = document.createElement("div");
-              groupNode.className = "edit-point-list-group";
-              groupNode.textContent = groupTitle;
-              editPointList.appendChild(groupNode);
-            }
-            const entry = editPointEntryForHandle(handle);
-            const button = document.createElement("button");
-            button.type = "button";
-            button.className = "edit-point-list-item";
-            button.classList.toggle(handle === selectedEditHandle(), "is-active");
-            const label = document.createElement("span");
-            label.textContent = String(
-              (entry && entry.label) || handle.pointLabel || handle.pointRole || `P${handle.pointIndex + 1}`,
-            );
-            const meta = document.createElement("span");
-            meta.className = "edit-point-list-meta";
-            const md = editPointMd(entry);
-            meta.textContent = Number.isFinite(md) ? `MD ${md.toFixed(1)} м` : editPointRoleTitle(handle);
-            button.append(label, meta);
-            button.addEventListener("click", () => {
-              setSelectedEditHandleIndex(editHandles.indexOf(handle), { focus: true });
-            });
-            editPointList.appendChild(button);
-          });
-          if (handles.length === 0) {
-            const empty = document.createElement("div");
-            empty.className = "edit-inspector-note";
-            empty.textContent = filter ? "Точки не найдены" : "Нет редактируемых точек";
-            editPointList.appendChild(empty);
-          }
-        }
-
         function syncEditInspector() {
           if (!editInspector) {
             return;
@@ -15497,42 +15612,29 @@ class FastReplan {
           }
           const padSelected = isValidEditPadIndex(selectedEditPadIndex);
           const handle = padSelected ? null : selectedEditHandle();
-          const well = Number.isInteger(selectedEditWellIndex) ? editWells[selectedEditWellIndex] || {} : {};
           const entry = editPointEntryForHandle(handle);
-          if (editSelectionCount) {
-            editSelectionCount.textContent = padSelected ? "куст" : `${selectedEditWellIndices.size || 0} скв.`;
-          }
-          if (editInspectorSelection) {
-            editInspectorSelection.textContent = padSelected
-              ? String((editPads[selectedEditPadIndex] || {}).title || "Выбранный куст")
-              : String(well.name || "Выберите скважину");
-          }
           if (editPointEditor) {
             editPointEditor.style.display = padSelected || !handle ? "none" : "flex";
           }
           if (editPadSummary) {
             editPadSummary.style.display = padSelected ? "flex" : "none";
           }
-          if (editPointList) {
-            editPointList.style.display = padSelected ? "none" : "flex";
-          }
-          if (editInspectorTitle) {
-            editInspectorTitle.textContent = padSelected ? "Редактирование куста" : "Редактирование точек";
-          }
+          if (editCurrentPointName) editCurrentPointName.textContent = "—";
+          if (editCurrentWellName) editCurrentWellName.textContent = "—";
           if (handle && entry) {
+            const well = editWells[handle.wellIndex] || {};
+            if (editCurrentPointName) {
+              editCurrentPointName.textContent = String(
+                handle.pointType || entry.pointType || "Точка",
+              );
+            }
+            if (editCurrentWellName) {
+              editCurrentWellName.textContent = String(well.name || "Скважина");
+            }
             const point = copyEditPoint(entry.position);
-            if (editPointEditorTitle) editPointEditorTitle.textContent = String(entry.label || handle.pointRole || "Точка");
-            if (editPointEditorMeta) {
-              const md = editPointMd(entry);
-              editPointEditorMeta.textContent = `${editPointRoleTitle(handle)} · ${Number.isFinite(md) ? `MD ${md.toFixed(2)} м` : "MD не задан"}`;
-            }
             [editCoordinateX, editCoordinateY, editCoordinateZ].forEach((field, index) => {
-              if (field && document.activeElement !== field) field.value = Number(point[index]).toFixed(3);
+              if (field) field.textContent = formatCoordinateMeters(point[index]);
             });
-            if (editZNote) {
-              const scale = Number(worldAxisZScaleSlider && worldAxisZScaleSlider.value) || 1;
-              editZNote.textContent = `+Z — глубже, −Z — мельче. Визуальный масштаб Z: ${scale.toFixed(2)}×, реальные координаты не меняются.`;
-            }
             const sidetrack = handle.pointRole === "sidetrack_window" && entry.sidetrackWindow;
             if (editSidetrackEditor) editSidetrackEditor.style.display = sidetrack ? "flex" : "none";
             if (sidetrack) {
@@ -15541,13 +15643,6 @@ class FastReplan {
               if (editSidetrackTvd) editSidetrackTvd.value = Number(point[2]).toFixed(2);
               if (editSidetrackRange) editSidetrackRange.textContent = `Диапазон MD: ${sidetrack.parentPoints.length > 1 ? `${sidetrack.parentPoints[0][3].toFixed(1)}–${sidetrack.parentPoints[sidetrack.parentPoints.length - 1][3].toFixed(1)} м` : "не задан"}`;
             }
-          }
-          renderEditPointList();
-          if (editPreviewStatusText) {
-            const dirty = editDirtyFlags.some(Boolean) || editPadDirtyFlags.some(Boolean);
-            editPreviewStatusText.textContent = dirty
-              ? "Предварительная геометрия. После сохранения требуется пересчёт; anti-collision для изменённых целей устарел."
-              : "Расчётная геометрия актуальна.";
           }
           if (padSelected) {
             syncEditPadSummary();
@@ -15968,7 +16063,6 @@ class FastReplan {
         function editRotationModeEnabled() {
           return (
             editModeActive &&
-            editMoveScope === "pair" &&
             editTransformMode === "rotate" &&
             Number.isInteger(selectedEditWellIndex) &&
             editWellSupportsRotation(selectedEditWellIndex)
@@ -16909,10 +17003,7 @@ class FastReplan {
           }
           const normalizedRole = String(pointRole || "");
           const normalizedScope = String(moveScope || "");
-          if (
-            normalizedScope === "selected" &&
-            selectedEditWellIndices.has(primaryWellIndex)
-          ) {
+          if (selectedEditWellIndices.has(primaryWellIndex) && selectedEditWellIndices.size > 1) {
             return selectedEditWellIndexArray();
           }
           if (
@@ -16989,40 +17080,6 @@ class FastReplan {
           return Number.isFinite(value) ? value : null;
         }
 
-        function applyExactSelectedPointFromInspector() {
-          const handle = selectedEditHandle();
-          const wellIndex = selectedEditWellIndex;
-          if (!editModeActive || Number.isInteger(selectedEditPadIndex) || !handle || !Number.isInteger(wellIndex)) {
-            return;
-          }
-          const x = finiteInspectorNumber(editCoordinateX);
-          const y = finiteInspectorNumber(editCoordinateY);
-          const z = finiteInspectorNumber(editCoordinateZ);
-          if (x === null || y === null || z === null) {
-            return;
-          }
-          const before = cloneEditState(wellIndex);
-          if (editWellHasExplicitPoints(wellIndex)) {
-            const nextPoints = copyEditPointEntries(before.points);
-            if (!nextPoints[handle.pointIndex]) {
-              return;
-            }
-            nextPoints[handle.pointIndex].position = [x, y, z];
-            updateWellEditPoints(wellIndex, nextPoints);
-          } else if (handle.pointRole === "t1" || handle.pointRole === "t3") {
-            const point = [x, y, z];
-            updateWellEditTargets(
-              wellIndex,
-              handle.pointRole === "t1" ? point : before.t1,
-              handle.pointRole === "t3" ? point : before.t3,
-            );
-          } else {
-            return;
-          }
-          pushEditUndoState(wellIndex, before);
-          finalizeEditUpdates([wellIndex]);
-        }
-
         function parentPositionAtMd(parentPoints, requestedMd) {
           if (!Array.isArray(parentPoints) || parentPoints.length === 0) {
             return null;
@@ -17088,36 +17145,6 @@ class FastReplan {
           finalizeEditUpdates([wellIndex]);
         }
 
-        function applySelectedDeltaFromInspector() {
-          const handle = selectedEditHandle();
-          const wellIndex = selectedEditWellIndex;
-          const delta = [
-            finiteInspectorNumber(editDeltaX),
-            finiteInspectorNumber(editDeltaY),
-            finiteInspectorNumber(editDeltaZ),
-          ];
-          if (
-            !editModeActive ||
-            Number.isInteger(selectedEditPadIndex) ||
-            !handle ||
-            !Number.isInteger(wellIndex) ||
-            delta.some((value) => value === null)
-          ) {
-            return;
-          }
-          const affected = selectedEditWellIndexArray();
-          const beforeStates = collectEditStates(affected);
-          const appliedIndices = applySynchronizedDeltaFromStates(
-            beforeStates,
-            wellIndex,
-            handle,
-            delta,
-            editMoveScope,
-          );
-          pushEditUndoStates(beforeStates);
-          finalizeEditUpdates(appliedIndices);
-        }
-
         function syncEditToolboxState() {
           if (!editUndoBtn || !editRedoBtn || !editResetBtn || !editPointSelector) {
             return;
@@ -17125,6 +17152,7 @@ class FastReplan {
           const selectedPad = isValidEditPadIndex(selectedEditPadIndex)
             ? selectedEditPadIndex
             : null;
+          editToolbox.classList.toggle("is-pad-selection", selectedPad !== null);
           const selectedIndex = selectedPad === null && Number.isInteger(selectedEditWellIndex)
             ? selectedEditWellIndex
             : null;
@@ -17159,6 +17187,7 @@ class FastReplan {
                 ? !Boolean(editPadDirtyFlags[selectedPad])
                 : !Boolean(editDirtyFlags[selectedIndex])
             );
+          editCancelBtn.disabled = !editModeActive || !editHasAnyChange;
           editPlaneSelector.querySelectorAll(".plane-btn").forEach((btn) => {
             btn.disabled =
               !editModeActive ||
@@ -17183,10 +17212,7 @@ class FastReplan {
               (
                 btn.dataset.operation === "rotate" &&
                 selectedPad === null &&
-                (
-                  editMoveScope !== "pair" ||
-                  !editWellSupportsRotation(selectedIndex)
-                )
+                (selectedEditWellIndices.size > 1 || !editWellSupportsRotation(selectedIndex))
               );
           });
           syncEditPadSummary();
@@ -17231,7 +17257,7 @@ class FastReplan {
               appliedIndices.push(selectedIndex);
             }
           });
-          if (appliedIndices.length > 1) {
+          if (appliedIndices.length > 0) {
             syncEditVisibility();
             showEditFeedback();
             requestRender();
@@ -17276,7 +17302,7 @@ class FastReplan {
               appliedIndices.push(selectedIndex);
             }
           });
-          if (appliedIndices.length > 1) {
+          if (appliedIndices.length > 0) {
             syncEditVisibility();
             showEditFeedback();
             requestRender();
@@ -17321,11 +17347,47 @@ class FastReplan {
             applyEditState(selectedIndex, originalState);
             appliedIndices.push(selectedIndex);
           });
-          if (appliedIndices.length > 1) {
+          if (appliedIndices.length > 0) {
             syncEditVisibility();
             showEditFeedback();
             requestRender();
           }
+        }
+
+        function cancelEditChanges() {
+          if (!editModeActive) {
+            return;
+          }
+          if (
+            editHasAnyChange &&
+            !window.confirm("Отменить все несохранённые изменения?")
+          ) {
+            return;
+          }
+          editDirtyFlags.forEach((isDirty, wellIndex) => {
+            if (!isDirty) {
+              return;
+            }
+            applyEditState(wellIndex, originalEditState(wellIndex));
+            editUndoStacks[wellIndex] = [];
+            editRedoStacks[wellIndex] = [];
+          });
+          editPadDirtyFlags.forEach((isDirty, padIndex) => {
+            if (!isDirty) {
+              return;
+            }
+            applyEditPadState(
+              padIndex,
+              editPadOriginalAnchors[padIndex],
+              originalEditPadSurfacePoints(padIndex),
+              editPadOriginalNds[padIndex],
+            );
+            editPadUndoStacks[padIndex] = [];
+            editPadRedoStacks[padIndex] = [];
+          });
+          editHasAnyChange = false;
+          resetEditSaveButtonState();
+          setEditMode(false);
         }
 
         function initEditHandles() {
@@ -17576,7 +17638,7 @@ class FastReplan {
               "",
               initialDisplayPoint,
               EDIT_PAD_HANDLE_ACCENT,
-              "edit-pad-handle-label",
+              "edit-delta-label",
               { offsetX: 14, offsetY: 18, role: "edit_pad_label" },
             );
             label.visible = false;
@@ -17959,7 +18021,7 @@ class FastReplan {
         }
 
         function setEditMoveScope(scope) {
-          const validScopes = new Set(["point", "pair", "well", "after", "selected"]);
+          const validScopes = new Set(["point", "well", "after"]);
           if (!validScopes.has(String(scope || ""))) {
             return;
           }
@@ -17967,12 +18029,6 @@ class FastReplan {
           editScopeSelector.querySelectorAll(".scope-btn").forEach((btn) => {
             btn.classList.toggle("is-active", btn.dataset.scope === scope);
           });
-          if (editMoveScope !== "pair" && editTransformMode === "rotate") {
-            if (!Number.isInteger(selectedEditPadIndex)) {
-              setEditTransformMode("move");
-              return;
-            }
-          }
           syncSelectedEditHandle();
           syncEditRotationControls();
           syncEditToolboxState();
@@ -17987,7 +18043,6 @@ class FastReplan {
             if (Number.isInteger(selectedEditPadIndex)) {
               // pad rotation always allowed
             } else if (
-              editMoveScope !== "pair" ||
               (Number.isInteger(selectedEditWellIndex) &&
                 !editWellSupportsRotation(selectedEditWellIndex))
             ) {
@@ -18204,11 +18259,7 @@ class FastReplan {
             default:
               return null;
           }
-          const configuredStep = Number(editEditStep && editEditStep.value);
-          const step = Number.isFinite(configuredStep) && configuredStep > 0
-            ? configuredStep
-            : EDIT_KEYBOARD_STEP_M;
-          return direction.map((value) => value * step);
+          return direction.map((value) => value * EDIT_KEYBOARD_STEP_M);
         }
 
         function shouldHandleEditKeyboardEvent(event) {
@@ -18300,12 +18351,9 @@ class FastReplan {
           syncSelectedEditHandle();
           const activeHandle = selectedEditHandle();
           if (
-            editMoveScope !== "pair" &&
-            (
-              !activeHandle ||
-              activeHandle.wellIndex !== wellIndex ||
-              activeHandle.pointRole === "sidetrack_window"
-            )
+            !activeHandle ||
+            activeHandle.wellIndex !== wellIndex ||
+            activeHandle.pointRole === "sidetrack_window"
           ) {
             return false;
           }
@@ -19512,6 +19560,132 @@ class FastReplan {
           optionalReferenceLabels.forEach((item) => addLabel(item));
         }
 
+        function captureEditRuntimeContext() {
+          const selectedWellIndices = selectedEditWellIndexArray();
+          const selectedWellNames = selectedWellIndices
+            .map((index) => String((editWells[index] && editWells[index].name) || ""))
+            .filter((name) => name.length > 0);
+          const primaryWellName = Number.isInteger(selectedEditWellIndex)
+            ? String((editWells[selectedEditWellIndex] && editWells[selectedEditWellIndex].name) || "")
+            : "";
+          const selectedPadId = isValidEditPadIndex(selectedEditPadIndex)
+            ? String((editPads[selectedEditPadIndex] && editPads[selectedEditPadIndex].id) || "")
+            : "";
+          const selectedHandle = selectedEditHandle();
+          return {
+            active: Boolean(editModeActive),
+            selectedPadId: selectedPadId,
+            selectedWellNames: selectedWellNames,
+            primaryWellName: primaryWellName,
+            selectedPointRole: String((selectedHandle && selectedHandle.pointRole) || ""),
+            selectedPointLabel: String((selectedHandle && selectedHandle.pointType) || ""),
+            selectedPointIndex: Number.isInteger(selectedHandle && selectedHandle.pointIndex)
+              ? Number(selectedHandle.pointIndex)
+              : null,
+            plane: String(editPlane || "xy"),
+            moveScope: String(editMoveScope || "point"),
+            transformMode: String(editTransformMode || "move"),
+            warningDismissed: Boolean(editWarningDismissed),
+          };
+        }
+
+        function restoreEditRuntimeContext(context) {
+          if (!context || !context.active || !canEditTargets) {
+            return;
+          }
+
+          selectedEditPadIndex = null;
+          selectedEditWellIndex = null;
+          selectedEditWellIndices = new Set();
+          editLegendSelectionAnchorIndex = null;
+
+          const rawPadIndex = context.selectedPadId
+            ? editPadIndexById.get(String(context.selectedPadId))
+            : null;
+          const padIndex = Number(rawPadIndex);
+          if (isValidEditPadIndex(padIndex)) {
+            selectedEditPadIndex = padIndex;
+            selectedEditHandleIndex = null;
+          } else {
+            const restoredIndices = (Array.isArray(context.selectedWellNames)
+              ? context.selectedWellNames
+              : [])
+              .map((name) => editWellIndexByName.get(String(name)))
+              .filter((index) => isValidEditWellIndex(index));
+            const uniqueIndices = Array.from(new Set(restoredIndices));
+            const primaryIndex = editWellIndexByName.get(String(context.primaryWellName || ""));
+            if (uniqueIndices.length > 0) {
+              selectedEditWellIndices = new Set(uniqueIndices);
+              selectedEditWellIndex = isValidEditWellIndex(primaryIndex)
+                ? Number(primaryIndex)
+                : uniqueIndices[0];
+              editLegendSelectionAnchorIndex = selectedEditWellIndex;
+            } else if (editWells.length > 0) {
+              selectedEditWellIndex = 0;
+              selectedEditWellIndices = new Set([0]);
+              editLegendSelectionAnchorIndex = 0;
+            }
+          }
+
+          editPlane =
+            selectedEditPadIndex === null && context.plane === "z" ? "z" : "xy";
+          editMoveScope = ["point", "well", "after"].includes(context.moveScope)
+            ? context.moveScope
+            : "point";
+          editTransformMode = "move";
+          editModeActive = true;
+          editWarningDismissed = Boolean(context.warningDismissed);
+          editTargetsBtn.classList.add("is-active");
+          editTargetsBtn.textContent = "Завершить редактирование";
+          editToolbox.classList.add("is-visible");
+
+          if (selectedEditPadIndex === null && Number.isInteger(selectedEditWellIndex)) {
+            const exactHandleIndex = editHandles.findIndex((handle) =>
+              handle &&
+              handle.wellIndex === selectedEditWellIndex &&
+              String(handle.pointRole || "") === String(context.selectedPointRole || "") &&
+              String(handle.pointType || "") === String(context.selectedPointLabel || "") &&
+              Number(handle.pointIndex) === Number(context.selectedPointIndex),
+            );
+            const roleHandleIndex = handleIndexForWellPointRole(
+              selectedEditWellIndex,
+              context.selectedPointRole,
+            );
+            selectedEditHandleIndex = exactHandleIndex >= 0
+              ? exactHandleIndex
+              : roleHandleIndex;
+          } else {
+            selectedEditHandleIndex = null;
+          }
+          syncSelectedEditHandle();
+          if (
+            context.transformMode === "rotate" &&
+            selectedEditPadIndex === null &&
+            Number.isInteger(selectedEditWellIndex) &&
+            selectedEditWellIndices.size <= 1 &&
+            editWellSupportsRotation(selectedEditWellIndex)
+          ) {
+            editTransformMode = "rotate";
+          }
+          editPlaneSelector.querySelectorAll(".plane-btn").forEach((btn) => {
+            btn.classList.toggle("is-active", btn.dataset.plane === editPlane);
+          });
+          editScopeSelector.querySelectorAll(".scope-btn").forEach((btn) => {
+            btn.classList.toggle("is-active", btn.dataset.scope === editMoveScope);
+          });
+          editOperationSelector.querySelectorAll(".operation-btn").forEach((btn) => {
+            btn.classList.toggle(
+              "is-active",
+              btn.dataset.operation === editTransformMode,
+            );
+          });
+          resetEditSaveButtonState();
+          syncEditVisibility();
+          showEditFeedback();
+          syncEditToolboxState();
+          requestRender();
+        }
+
         function removeTrackedObjectFromCollections(object) {
           const hoverIndex = hoverTargets.indexOf(object);
           if (hoverIndex >= 0) {
@@ -19692,6 +19866,7 @@ class FastReplan {
           const resolvedPayload =
             nextPayload && typeof nextPayload === "object" ? nextPayload : {};
           const preserveView = Boolean(options && options.preserveView);
+          const editRuntimeContext = captureEditRuntimeContext();
           const oldSceneOrigin = {
             x: Number(sceneOrigin && sceneOrigin.x) || 0,
             y: Number(sceneOrigin && sceneOrigin.y) || 0,
@@ -19738,6 +19913,7 @@ class FastReplan {
           if (canEditTargets) {
             initEditHandles();
             initEditPads();
+            restoreEditRuntimeContext(editRuntimeContext);
             syncEditVisibility();
             syncEditToolboxState();
           }
@@ -19829,19 +20005,8 @@ class FastReplan {
           editUndoBtn.addEventListener("click", undoSelectedEdit);
           editRedoBtn.addEventListener("click", redoSelectedEdit);
           editResetBtn.addEventListener("click", resetSelectedEdit);
+          editCancelBtn.addEventListener("click", cancelEditChanges);
           editSaveBtn.addEventListener("click", onEditSave);
-          if (editPointFilter) {
-            editPointFilter.addEventListener("input", () => {
-              editInspectorListKey = "";
-              syncEditInspector();
-            });
-          }
-          if (editApplyCoordinates) {
-            editApplyCoordinates.addEventListener("click", applyExactSelectedPointFromInspector);
-          }
-          if (editApplyDelta) {
-            editApplyDelta.addEventListener("click", applySelectedDeltaFromInspector);
-          }
           if (editApplySidetrack) {
             editApplySidetrack.addEventListener("click", applySidetrackFromInspector);
           }

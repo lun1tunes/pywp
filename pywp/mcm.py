@@ -22,6 +22,15 @@ def dogleg_angle_rad(
     i2 = np.asarray(inc2_deg, dtype=float) * DEG2RAD
     a1 = np.asarray(azi1_deg, dtype=float) * DEG2RAD
     a2 = np.asarray(azi2_deg, dtype=float) * DEG2RAD
+    if not all(
+        np.all(np.isfinite(values))
+        for values in (i1, i2, a1, a2)
+    ):
+        raise ValueError("dogleg angle requires finite INC/AZI values.")
+    if np.any((i1 < 0.0) | (i1 > np.pi)) or np.any(
+        (i2 < 0.0) | (i2 > np.pi)
+    ):
+        raise ValueError("dogleg angle requires INC values in [0, 180] degrees.")
 
     cos_beta = np.cos(i1) * np.cos(i2) + np.sin(i1) * np.sin(i2) * np.cos(a2 - a1)
     cos_beta = np.clip(cos_beta, -1.0, 1.0)
@@ -64,6 +73,8 @@ def dls_deg_per_30m(
     azi2_deg: np.ndarray | float,
 ) -> np.ndarray:
     dmd = np.asarray(md2_m, dtype=float) - np.asarray(md1_m, dtype=float)
+    if np.any(~np.isfinite(dmd)):
+        raise ValueError("DLS calculation requires finite MD values.")
     beta_deg = dogleg_angle_rad(inc1_deg, azi1_deg, inc2_deg, azi2_deg) * RAD2DEG
     with np.errstate(divide="ignore", invalid="ignore"):
         dls = np.where(dmd > 0.0, beta_deg * (30.0 / dmd), np.nan)
@@ -78,9 +89,28 @@ def minimum_curvature_increment(
     inc2_deg: float,
     azi2_deg: float,
 ) -> tuple[float, float, float]:
-    dmd = float(md2_m - md1_m)
+    try:
+        md1 = float(md1_m)
+        md2 = float(md2_m)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("minimum-curvature increment requires numeric MD values.") from exc
+    dmd = float(md2 - md1)
+    if not np.isfinite(dmd):
+        raise ValueError("minimum-curvature increment requires finite MD values.")
     if dmd <= 0.0:
         raise ValueError("minimum-curvature increment requires md2_m > md1_m.")
+
+    try:
+        angles = tuple(
+            float(value)
+            for value in (inc1_deg, azi1_deg, inc2_deg, azi2_deg)
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "minimum-curvature increment requires numeric INC/AZI values."
+        ) from exc
+    if not all(np.isfinite(value) for value in angles):
+        raise ValueError("minimum-curvature increment requires finite INC/AZI values.")
 
     i1 = float(inc1_deg) * DEG2RAD
     i2 = float(inc2_deg) * DEG2RAD
@@ -101,8 +131,13 @@ def compute_positions_min_curv(stations: pd.DataFrame, start: Point3D) -> pd.Dat
     missing = required_cols.difference(stations.columns)
     if missing:
         raise ValueError(f"stations is missing required columns: {sorted(missing)}")
+    if stations.empty:
+        raise ValueError("minimum-curvature stations must contain at least one station.")
 
-    df = stations.sort_values("MD_m").reset_index(drop=True).copy()
+    # Preserve the caller's station order.  Sorting here would silently turn
+    # a malformed survey into a different trajectory; the monotonicity check
+    # below must validate the supplied order instead.
+    df = stations.reset_index(drop=True).copy()
     md_values = df["MD_m"].to_numpy(dtype=float)
     inc_values = df["INC_deg"].to_numpy(dtype=float)
     azi_values = df["AZI_deg"].to_numpy(dtype=float)
@@ -112,8 +147,15 @@ def compute_positions_min_curv(stations: pd.DataFrame, start: Point3D) -> pd.Dat
         and np.all(np.isfinite(azi_values))
     ):
         raise ValueError("minimum-curvature stations require finite MD/INC/AZI values.")
-    if len(md_values) > 1 and np.any(np.diff(md_values) <= 0.0):
-        raise ValueError("minimum-curvature stations require strictly increasing MD.")
+    if np.any((inc_values < 0.0) | (inc_values > 180.0)):
+        raise ValueError(
+            "minimum-curvature stations require INC values in [0, 180] degrees."
+        )
+    if len(md_values) > 1:
+        with np.errstate(over="ignore", invalid="ignore"):
+            md_differences = np.diff(md_values)
+        if np.any(md_differences <= 0.0):
+            raise ValueError("minimum-curvature stations require strictly increasing MD.")
     df["AZI_deg"] = wrap_azimuth_deg(df["AZI_deg"].to_numpy())
 
     north = [start.y]
@@ -132,6 +174,15 @@ def compute_positions_min_curv(stations: pd.DataFrame, start: Point3D) -> pd.Dat
         north.append(north[-1] + d_n)
         east.append(east[-1] + d_e)
         tvd.append(tvd[-1] + d_tvd)
+
+    if not (
+        np.all(np.isfinite(north))
+        and np.all(np.isfinite(east))
+        and np.all(np.isfinite(tvd))
+    ):
+        raise ValueError(
+            "minimum-curvature calculation produced non-finite coordinates."
+        )
 
     df["N_m"] = north
     df["E_m"] = east
