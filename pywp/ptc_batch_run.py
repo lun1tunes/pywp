@@ -19,6 +19,7 @@ from pywp.pilot_wells import (
     parent_name_for_zbs,
     pilot_name_key_for_parent,
     pilot_name_key_for_record,
+    pilot_parent_key_for_record,
     sync_pilot_surfaces_to_parents,
     visible_well_names,
     well_name_key,
@@ -391,18 +392,48 @@ def run_batch_if_clicked(
         state.get("wt_pad_auto_applied_on_import", False)
     )
     if pad_layout_active:
-        base_records = state.get("wt_records_original")
-        if base_records:
-            pads = hooks.ensure_pad_configs(base_records=list(base_records))
-            plan_map = hooks.build_pad_plan_map(pads)
-            records_for_run = sync_pilot_surfaces_to_parents(
-                apply_pad_layout(
-                    records=list(base_records),
-                    pads=pads,
-                    plan_by_pad_id=plan_map,
-                )
-            )
-            state["wt_records"] = list(records_for_run)
+        # Apply already committed geometry to the working records. Rebuilding
+        # from the immutable import snapshot would discard unrelated edits and
+        # would move pilots from other pads during a partial recalculation.
+        selected_keys = {well_name_key(name) for name in selected_set}
+        selected_records = [
+            record for record in records_for_run
+            if well_name_key(record.name) in selected_keys
+        ]
+        parent_keys = {pilot_parent_key_for_record(record) for record in selected_records}
+        layout_parent_keys = {
+            pilot_parent_key_for_record(record) for record in selected_records
+            if not is_pilot_name(record.name) and not is_zbs_record(record)
+        }
+        execution_keys = selected_keys | {
+            pilot_name_key_for_record(record) for record in selected_records
+            if not is_pilot_name(record.name) and not is_zbs_record(record)
+        }
+        # Membership is anchored to the import (moving a pad must not redetect
+        # its ID), but coordinate updates are applied to current working data.
+        pads = hooks.ensure_pad_configs(
+            base_records=list(state.get("wt_records_original") or records_for_run)
+        )
+        pads = [
+            pad for pad in pads
+            if any(pilot_parent_key_for_record(well) in layout_parent_keys
+                   for well in getattr(pad, "wells", ()))
+        ]
+        plan_map = hooks.build_pad_plan_map(pads)
+        laid_out_records = sync_pilot_surfaces_to_parents(
+            apply_pad_layout(
+                records=list(records_for_run), pads=pads, plan_by_pad_id=plan_map
+            ),
+            only_parent_keys=parent_keys,
+        )
+        laid_out_by_name = {well_name_key(record.name): record for record in laid_out_records}
+        # Partial selections within a pad also leave unselected siblings alone.
+        records_for_run = [
+            laid_out_by_name.get(well_name_key(record.name), record)
+            if well_name_key(record.name) in execution_keys else record
+            for record in records_for_run
+        ]
+        state["wt_records"] = list(records_for_run)
 
     batch = WelltrackBatchPlanner(planner=TrajectoryPlanner())
     log_verbosity = str(state.get("wt_log_verbosity", log_compact_label))

@@ -43,7 +43,7 @@ from pywp.anticollision_rerun_models import (
     TrajectoryOverrideSpec,
 )
 from pywp.models import OPTIMIZATION_ANTI_COLLISION_AVOIDANCE, OPTIMIZATION_MINIMIZE_KOP
-from pywp.parallel import process_pool_context
+from pywp.parallel import calculation_budgeted, process_pool_context
 from pywp.pilot_wells import paired_pilot_parent_names, well_name_key
 from pywp.reference_trajectories import (
     ImportedTrajectoryWell,
@@ -303,6 +303,7 @@ def reference_wells_in_anti_collision_scope(
     return tuple(scoped)
 
 
+@calculation_budgeted
 def build_anti_collision_analysis_for_successes(
     successes: list[SuccessfulWellPlan],
     *,
@@ -348,6 +349,7 @@ def build_anti_collision_analysis_for_successes(
     )
 
 
+@calculation_budgeted
 def build_incremental_anti_collision_analysis_for_successes(
     successes: list[SuccessfulWellPlan],
     *,
@@ -407,6 +409,7 @@ def build_incremental_anti_collision_analysis_for_successes(
     return analysis, well_cache, pair_cache, stats
 
 
+@calculation_budgeted
 def build_anti_collision_wells_for_successes(
     successes: list[SuccessfulWellPlan],
     *,

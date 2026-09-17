@@ -344,8 +344,8 @@ def test_viewer_template_shows_xyz_hover_for_edit_handles() -> None:
     assert "fitCameraToEditWellTargets(nextIndex)" in html
     assert "data-edit-well-index" in html
     assert "function selectEditWell(index, options)" in html
-    assert "function sendEditTargetsToStreamlit(changes, padChanges)" in html
-    assert "pad_changes: Array.isArray(padChanges) ? padChanges : []" in html
+    assert "function sendEditTargetsToStreamlit(operation)" in html
+    assert "pad_changes: padChanges" in html
     assert "font-size: 15px;" in html
     assert "const originalMesh = new THREE.Mesh(handleGeometry, originalMat);" in html
     assert "originalMesh.position.copy(displayPoint(point));" in html
@@ -467,7 +467,7 @@ def test_viewer_template_shows_xyz_hover_for_edit_handles() -> None:
     assert "return endpointExact(warped, surface, t1, t3);" in html
     assert "function applyViewerPayload(nextPayload, options)" in html
     assert "function applyAntiCollisionOverlayPayload(nextPayload)" in html
-    assert "window.__PYWP_VIEWER_UPDATE__ = function (nextPayloadJson, nextPayloadDigest)" in html
+    assert "window.__PYWP_VIEWER_UPDATE__ = function (nextPayloadJson, nextPayloadDigest, editAck, context = {})" in html
     assert "window.__PYWP_VIEWER_APPLY_ANTICOLLISION_OVERLAY__ = function (" in html
     assert "clearViewerDataObjects();" in html
     assert "clearAntiCollisionVisualPayload();" in html
@@ -727,6 +727,14 @@ def test_viewer_template_focuses_camera_for_pad_legend_clicks_in_edit_mode() -> 
     assert "if (editModeActive) {\n                selectEditPad(editablePadIndex, { focus: true });\n                return;\n              }" in html
 
 
+def test_pad_marker_frame_updates_do_not_invalidate_materials() -> None:
+    html = three_viewer._viewer_template_with_libraries()
+    update = html.split("function updateEditPadNdsVisuals(marker)")[1].split(
+        "function createEditDeltaLine"
+    )[0]
+    assert "needsUpdate" not in update
+
+
 def test_viewer_template_uses_single_scene_handle_for_pad_edits() -> None:
     html = three_viewer._viewer_template_with_libraries()
     pad_section = html.split("function initEditPads()")[1].split(
@@ -742,7 +750,11 @@ def test_viewer_template_uses_single_scene_handle_for_pad_edits() -> None:
     assert 'kind === "pad" ? new Set() : legendWellNameKeysForItem(item, kind)' in html
     assert 'String((pad && pad.anchor_mode) || "") === "center" ? "Центр" : "S";' in html
     assert "const markerPoint = anchor.slice();" in html
-    assert "const markerGeometry = new THREE.SphereGeometry(1.0, 16, 12);" in html
+    assert "const markerGeometry = new THREE.CylinderGeometry(0.9, 0.9, 0.42, 6);" in html
+    assert "markerGeometry.rotateX(Math.PI * 0.5);" in html
+    assert "const selectionGeometry = new THREE.RingGeometry(0.90, 1.0, 6);" in html
+    assert "marker.mesh.quaternion.copy(camera.quaternion);" in html
+    assert "editHandleScale(displayPosition, selectedPad ? 20.0 : 14.0)" in html
     assert "OctahedronGeometry" not in pad_section
     assert "pointIndex: null," in html
     assert 'point: marker.pointLabel || "S",' in html
@@ -755,14 +767,13 @@ def test_viewer_template_uses_single_scene_handle_for_pad_edits() -> None:
     assert "ndsAzimuthDeg: initialNds," in html
     assert "ndsAzimuthDeg: Number((pad && pad.nds_azimuth_deg) || 0)," not in html
     assert "function syncEditPadHandleLabel(marker)" in html
-    assert "return `Куст ${padLabel} · ${roleLabel}`;" in html
-    assert "formatCoordinateMeters(current[0])" in html
-    assert "formatCoordinateMeters(current[1])" in html
-    assert "formatDeltaMeters(dx)" in html
-    assert "formatDeltaMeters(dy)" in html
+    assert "return `Куст ${padLabel}`;" in html
+    assert 'id="edit-pad-well-list"' not in html
+    assert "function updateEditPadDeltaGuide(marker)" in html
+    assert "editPadMarkers.forEach(updateEditPadDeltaGuide);" in html
+    assert "marker.originalMesh.visible = editModeActive && selectedPad && dirtyPad;" in html
+    assert "marker.ndsArrow.group.visible = selected && editTransformMode === \"rotate\";" in html
     assert "formatAzimuthDegrees(currentNds)" in html
-    assert "formatAzimuthDegrees(originalNds)" in html
-    assert "formatDeltaDegrees(deltaNds)" in html
     assert '{ offsetX: 14, offsetY: 18, role: "edit_pad_label" },' in html
     assert "initEditDeltaLabelDrag(label);" in pad_section
     assert "function editPadRotationModeEnabled()" in html
@@ -990,6 +1001,13 @@ def test_render_local_three_scene_reuses_serialized_payload_for_same_object(
     assert json_calls["count"] == 1
     assert captured[0]["payload_json"] == captured[1]["payload_json"]
     assert captured[0]["payload_digest"] == captured[1]["payload_digest"]
+    ack = {"nonce": "noop-operation", "status": "noop"}
+    three_viewer.render_local_three_scene(
+        payload, height=480, instance_token=3, key="scene", edit_ack=ack
+    )
+    assert captured[2]["edit_ack"] == ack
+    assert captured[2]["payload_digest"] == captured[1]["payload_digest"]
+    assert json_calls["count"] == 1
 
 
 def test_three_viewer_runtime_component_relays_json_events() -> None:
@@ -1007,7 +1025,8 @@ def test_three_viewer_runtime_component_relays_json_events() -> None:
     assert 'fetch("./vendor/OrbitControls.js" + assetSuffix' in component_html
     assert 'fetch("./fast_replan.js" + assetSuffix' in component_html
     assert 'frame.srcdoc = sceneHtml;' in component_html
-    assert 'nextPayloadDigest === currentPayloadDigest' in component_html
+    assert 'const editAck = nextArgs.edit_ack || null;' in component_html
+    assert 'if (accepted === false)' in component_html
     assert "currentHasAntiCollisionPayload" in component_html
     assert "!currentHasAntiCollisionPayload &&" in component_html
     assert "nextHasAntiCollisionPayload &&" in component_html
@@ -1075,6 +1094,30 @@ def test_three_viewer_pending_edit_save_has_recoverable_timeout() -> None:
     assert "const EDIT_SAVE_ACK_TIMEOUT_MS = 12000;" in html
     assert "function showEditSaveError(message)" in html
     assert 'showEditSaveError("Нет подтверждения — повторить")' in html
+
+
+def test_three_viewer_pending_save_guards_all_edit_entry_points() -> None:
+    html = three_viewer._viewer_template_with_libraries()
+    for signature in (
+        "undoSelectedEdit()", "redoSelectedEdit()", "resetSelectedEdit()",
+        "cancelEditChanges()", "applySidetrackFromInspector()", "onEditKeyDown(event)",
+        "onEditPointerDown(event)", "setEditMode(active)",
+    ):
+        assert f"function {signature} {{\n          if (isEditSavePending()) return;" in html
+    assert "if (editSaveCanRetry) transmitPendingEditOperation();" in html
+    assert "return pendingEditOperation !== null;" in html
+    assert "function startMiniMapEditDrag(event) {\n          if (isEditSavePending()) return false;" in html
+
+
+def test_three_viewer_runtime_refresh_resets_pad_history_and_drag_snapshots() -> None:
+    html = three_viewer._viewer_template_with_libraries()
+    reset = html.split("function resetEditRuntimeState()", 1)[1].split(
+        "function clearViewerDataObjects()", 1
+    )[0]
+    for name in ("editPadUndoStacks", "editPadRedoStacks"):
+        assert f"{name}.length = 0;" in reset
+    for name in ("editPadDragHistoryStartState", "editPadRotateHistoryStartState"):
+        assert f"{name} = null;" in reset
 
 
 def test_three_viewer_refreshes_single_well_after_undo_redo_reset() -> None:

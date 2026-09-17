@@ -2087,10 +2087,12 @@ def test_welltrack_general_run_can_add_pad_to_existing_selection() -> None:
     ]
 
 
-def test_trajectory_three_payload_overrides_build_tree_focus_targets_for_multi_pad() -> (
-    None
-):
+def test_trajectory_three_payload_overrides_build_tree_focus_targets_for_multi_pad(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     page = wt_import_module
+    # This unit-level payload check must not inherit another AppTest's records.
+    monkeypatch.setattr(page.st, "session_state", {})
     records = _multi_pad_records()
     successes = [
         _successful_plan_xy(name="PAD1-A", x_offset_m=0.0, y_offset_m=0.0),
@@ -6388,6 +6390,40 @@ def test_queue_all_wells_results_focus_defers_results_view_reset_until_init_stat
     assert page.st.session_state["wt_pending_all_wells_results_focus"] is False
 
 
+def test_joint_three_edit_rolls_back_targets_and_pad_configs_on_plan_failure(monkeypatch) -> None:
+    page = wt_import_module
+    page.st.session_state.clear()
+    records = list(_records()[:2])
+    page.st.session_state["wt_records"] = records
+    page.st.session_state["wt_records_original"] = records
+    pads = page._ensure_pad_configs(records)
+    pad_id = str(pads[0].pad_id)
+    cfg = page.st.session_state["wt_pad_configs"][pad_id]
+    before = dict(page.st.session_state)
+    original_x = float(cfg["first_surface_x"])
+
+    def fail_plan(state, _pads):
+        assert state["wt_records"][0].points[2].x == 1600
+        assert state["wt_pad_configs"][pad_id]["first_surface_x"] == original_x + 120
+        assert cfg["first_surface_x"] == original_x
+        raise ValueError("injected pad plan failure")
+
+    monkeypatch.setattr(page.ptc_pad_state, "build_pad_plan_map", fail_plan)
+    event = {
+        "type": "pywp:editTargets", "nonce": "joint-failure",
+        "changes": [{"name": "WELL-A", "points": [{"index": 2, "position": [1600, 2000, 2500]}]}],
+        "pad_changes": [{"pad_id": pad_id, "anchor": [original_x + 120,
+            float(cfg["first_surface_y"]), float(cfg["first_surface_z"])]}],
+    }
+    assert page._handle_three_edit_event(event)
+    assert page.st.session_state["wt_three_edit_ack"]["status"] == "error"
+    assert all(page.st.session_state[key] is value for key, value in before.items())
+    assert set(page.st.session_state) - set(before) == {
+        "wt_last_edit_targets_nonce", "wt_three_edit_ack", "wt_three_edit_receipts"
+    }
+    assert not page._handle_three_edit_event(event)
+
+
 def test_apply_three_pad_edit_defers_result_widget_state_update() -> None:
     page = wt_import_module
     page.st.session_state.clear()
@@ -8558,6 +8594,28 @@ def test_focus_all_wells_trajectory_results_sets_detail_render_mode() -> None:
     assert "wt_3d_backend" not in page.st.session_state
 
 
+def test_three_noop_ack_reaches_its_component_with_one_fragment_rerun(monkeypatch) -> None:
+    from contextlib import nullcontext
+
+    page = wt_import_module
+    page.st.session_state.clear()
+    rendered = []
+    reruns = []
+
+    def render(_payload, **kwargs):
+        rendered.append(kwargs)
+        return {"type": "pywp:editTargets", "nonce": "noop-render", "changes": []}
+
+    monkeypatch.setattr(page, "render_local_three_scene", render)
+    monkeypatch.setattr(page, "_rerun_fragment", lambda: reruns.append("fragment"))
+    for _ in range(2):
+        page._render_three_payload(container=nullcontext(), payload={}, height=480)
+    assert reruns == ["fragment"]
+    assert rendered[0]["edit_ack"] is None
+    assert rendered[1]["edit_ack"] == {"nonce": "noop-render", "status": "noop"}
+    assert rendered[0]["instance_token"] == rendered[1]["instance_token"] == 0
+
+
 def test_render_three_payload_uses_local_three_renderer(monkeypatch) -> None:
     page = wt_import_module
     page.st.session_state.clear()
@@ -8621,7 +8679,7 @@ def test_render_three_payload_reruns_only_its_fragment_after_edit(monkeypatch) -
             return False
 
     monkeypatch.setattr(page, "render_local_three_scene", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(page, "_handle_three_edit_event", lambda _event: True)
+    monkeypatch.setattr(page, "_handle_three_edit_event", lambda _event, **_kwargs: True)
     monkeypatch.setattr(
         page,
         "_rerun_fragment",

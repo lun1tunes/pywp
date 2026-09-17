@@ -12,7 +12,7 @@ import pandas as pd
 
 from pywp.constants import SMALL
 from pywp.models import Point3D
-from pywp.parallel import process_pool_context
+from pywp.parallel import calculation_budgeted, process_pool_context
 from pywp.uncertainty import (
     DEFAULT_PLANNING_UNCERTAINTY_MODEL,
     PlanningUncertaintyModel,
@@ -452,6 +452,7 @@ def _display_geometry_sampling_model(
     )
 
 
+@calculation_budgeted
 def analyze_anti_collision(
     wells: list[AntiCollisionWell] | tuple[AntiCollisionWell, ...],
     *,
@@ -496,6 +497,7 @@ def _pair_cache_signature(
     )
 
 
+@calculation_budgeted
 def analyze_anti_collision_incremental(
     wells: list[AntiCollisionWell] | tuple[AntiCollisionWell, ...],
     *,

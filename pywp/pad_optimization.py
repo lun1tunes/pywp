@@ -24,7 +24,7 @@ from pywp.eclipse_welltrack import (
 )
 from pywp.multi_horizontal import extend_plan_with_multi_horizontal_targets
 from pywp.models import TrajectoryConfig
-from pywp.parallel import process_pool_context
+from pywp.parallel import calculation_budgeted, process_pool_context
 from pywp.planner import TrajectoryPlanner
 from pywp.reference_trajectories import (
     ImportedTrajectoryWell,
@@ -705,6 +705,7 @@ def _swap_surfaces_and_recalculate(
     return new_records, new_successes
 
 
+@calculation_budgeted
 def optimize_pad_order(
     records: list[WelltrackRecord],
     success_dict: dict[str, SuccessfulWellPlan],
@@ -759,16 +760,6 @@ def optimize_pad_order(
         return records, success_dict, False
 
     ref_wells = tuple(reference_wells)
-    # Use a Streamlit-safe context: spawn on Windows/macOS, forkserver on Linux.
-    _mp_ctx = process_pool_context()
-    try:
-        pool: ProcessPoolExecutor | None = ProcessPoolExecutor(
-            max_workers=2,
-            mp_context=_mp_ctx,
-        )
-    except (BrokenProcessPool, PicklingError, OSError, RuntimeError, ValueError):
-        pool = None
-
     # --- Pre-build lightweight AC wells (no display geometry). ---
     # Reused across candidates; only swapped wells are rebuilt.
     current_signatures = {
@@ -880,7 +871,19 @@ def optimize_pad_order(
 
     progress_callback(0, f"Начальный score: {_score_text(best_score)}.")
 
+    pool: ProcessPoolExecutor | None = None
+    pool_workers = 0
     try:
+        # Serial means serial. Create the trajectory pool only after initial
+        # validation/AC succeeds, and cover its entire lifetime with finally.
+        if int(parallel_workers) > 1:
+            try:
+                pool_workers = min(int(parallel_workers), 2)
+                pool = ProcessPoolExecutor(
+                    max_workers=pool_workers, mp_context=process_pool_context(),
+                )
+            except (BrokenProcessPool, PicklingError, OSError, RuntimeError, ValueError):
+                pool_workers = 0
         for iteration in range(1, _MAX_ITERATIONS + 1):
             if evaluated_candidate_count >= _MAX_CANDIDATE_EVALUATIONS:
                 stopped_by_budget = True
@@ -1041,7 +1044,10 @@ def optimize_pad_order(
                             ref_ac_wells,
                             well_signature_by_name=cand_signatures,
                             previous_pair_cache=current_pair_cache,
-                            parallel_workers=int(parallel_workers),
+                            # The reusable trajectory pool still owns these
+                            # processes while AC runs; do not double-count them
+                            # as available slots for a second pool.
+                            parallel_workers=max(int(parallel_workers) - pool_workers, 0),
                         )
                     )
                     cand_score = _optimization_score(

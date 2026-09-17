@@ -13,12 +13,17 @@ class WellTrajectory:
         self.segments = segments
 
     def stations(self, md_step_m: float) -> pd.DataFrame:
+        # Coalesce floating-point boundary slivers, not explicitly requested
+        # fine sampling. A fixed 1 mm tolerance collapsed an entire sub-mm grid.
+        min_interval_m = min(MIN_STATION_MD_INTERVAL_M, float(md_step_m) * 0.5)
         parts: list[pd.DataFrame] = []
         md_start = 0.0
         last_output_md: float | None = None
         for segment in self.segments:
             generated = segment.generate(md_start=md_start, md_step_m=md_step_m)
-            generated = _collapse_short_internal_stations(generated)
+            generated = _collapse_short_internal_stations(
+                generated, min_interval_m=min_interval_m
+            )
             if not generated.empty:
                 md_start = float(generated["MD_m"].iloc[-1])
             block = generated
@@ -30,17 +35,19 @@ class WellTrajectory:
                         parts=parts,
                         generated=generated,
                         last_output_md=last_output_md,
+                        min_interval_m=min_interval_m,
                     )
                 else:
                     md_values = block["MD_m"].to_numpy(dtype=float)
                     block = block.loc[
-                        md_values > last_output_md + MIN_STATION_MD_INTERVAL_M
+                        md_values > last_output_md + min_interval_m
                     ].copy()
                     if block.empty:
                         last_output_md = _collapse_short_boundary_station(
                             parts=parts,
                             generated=generated,
                             last_output_md=last_output_md,
+                            min_interval_m=min_interval_m,
                         )
             if not block.empty:
                 parts.append(block)
@@ -53,7 +60,9 @@ class WellTrajectory:
         return stations
 
 
-def _collapse_short_internal_stations(generated: pd.DataFrame) -> pd.DataFrame:
+def _collapse_short_internal_stations(
+    generated: pd.DataFrame, *, min_interval_m: float = MIN_STATION_MD_INTERVAL_M,
+) -> pd.DataFrame:
     if generated.empty or "MD_m" not in generated.columns:
         return generated
 
@@ -61,7 +70,9 @@ def _collapse_short_internal_stations(generated: pd.DataFrame) -> pd.DataFrame:
     last_md: float | None = None
     for _, row in generated.iterrows():
         md_value = float(row["MD_m"])
-        if last_md is not None and md_value <= last_md + MIN_STATION_MD_INTERVAL_M:
+        # Never replace the origin by the second station. This matters when
+        # the first segment itself is shorter than the coalescing tolerance.
+        if len(kept_rows) > 1 and last_md is not None and md_value <= last_md + min_interval_m:
             if md_value >= last_md:
                 kept_rows[-1] = row.copy()
                 last_md = md_value
@@ -79,6 +90,7 @@ def _collapse_short_boundary_station(
     parts: list[pd.DataFrame],
     generated: pd.DataFrame,
     last_output_md: float,
+    min_interval_m: float = MIN_STATION_MD_INTERVAL_M,
 ) -> float:
     if not parts or generated.empty:
         return float(last_output_md)
@@ -86,8 +98,14 @@ def _collapse_short_boundary_station(
     final_md = float(final_row["MD_m"])
     if final_md <= float(last_output_md):
         return float(last_output_md)
-    if final_md > float(last_output_md) + MIN_STATION_MD_INTERVAL_M:
+    if final_md > float(last_output_md) + min_interval_m:
         return float(last_output_md)
+
+    # A zero-length initial segment leaves a single origin row. Retain it and
+    # append the next positive endpoint instead of moving MD=0 forward.
+    if len(parts) == 1 and len(parts[0]) == 1:
+        parts.append(generated.iloc[[-1]].copy())
+        return final_md
 
     target = parts[-1]
     row_index = target.index[-1]

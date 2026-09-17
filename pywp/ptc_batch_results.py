@@ -34,6 +34,7 @@ from pywp.ui_well_panels import (
     survey_export_csv_bytes,
     survey_export_dataframe,
     survey_export_excel_bytes,
+    survey_source_coordinates,
 )
 from pywp.welltrack_batch import SuccessfulWellPlan
 
@@ -815,7 +816,7 @@ def _build_batch_survey_export_frame(
         if source_stations.empty:
             continue
 
-        export_stations = source_stations.copy()
+        export_stations = survey_source_coordinates(source_stations)
         if export_context.should_transform:
             export_stations = transform_stations_func(
                 export_stations,

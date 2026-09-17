@@ -5,6 +5,7 @@ from io import BytesIO
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+import pytest
 
 from pywp.models import Point3D
 from pywp.ui_well_panels import (
@@ -12,7 +13,44 @@ from pywp.ui_well_panels import (
     render_trajectory_dls_panel,
     render_survey_table_with_download,
     survey_export_dataframe,
+    survey_source_coordinates,
 )
+
+
+@pytest.mark.parametrize("aliases", ["absent", "partial", "stale"])
+def test_survey_source_coordinates_uses_source_xy_without_mutating_cache(
+    aliases: str,
+) -> None:
+    stations = pd.DataFrame(
+        {
+            "MD_m": [100.0, 200.0, 300.0],
+            "X_m": [500000.0, 500100.0, 500200.0],
+            "Y_m": [6500000.0, 6500050.0, 6500100.0],
+            "Z_m": [-50.0, 40.0, 120.0],
+        },
+        index=[4, 9, 15],
+    )
+    if aliases == "partial":
+        stations["N_m"] = [np.nan, 6500050.0, np.nan]
+        stations["E_m"] = [500000.0, np.nan, np.nan]
+    elif aliases == "stale":
+        stations["N_m"] = [0.0, np.inf, -np.inf]
+        stations["E_m"] = [1.0, 2.0, 3.0]
+    stations.attrs["uncertainty_reference_stations"] = pd.DataFrame({"MD_m": [0.0]})
+    before = stations.copy(deep=True)
+
+    result = survey_source_coordinates(stations)
+
+    np.testing.assert_array_equal(result["N_m"], stations["Y_m"])
+    np.testing.assert_array_equal(result["E_m"], stations["X_m"])
+    pd.testing.assert_index_equal(result.index, stations.index)
+    other_columns = before.columns.difference(["N_m", "E_m"])
+    pd.testing.assert_frame_equal(result[other_columns], before[other_columns])
+    pd.testing.assert_frame_equal(stations, before)
+    pd.testing.assert_frame_equal(
+        result.attrs["uncertainty_reference_stations"],
+        before.attrs["uncertainty_reference_stations"],
+    )
 
 
 def test_survey_export_dataframe_labels_geographic_xy_columns() -> None:

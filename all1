@@ -3850,7 +3850,7 @@ def format_precheck_summary_ru(result: AnalyticalPreCheckResult) -> str:
     return "\n".join(lines)
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/anticollision.py	145187
+===BEGIN_FILE===	pywp/anticollision.py	145253
 from __future__ import annotations
 
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
@@ -3865,7 +3865,7 @@ import pandas as pd
 
 from pywp.constants import SMALL
 from pywp.models import Point3D
-from pywp.parallel import process_pool_context
+from pywp.parallel import calculation_budgeted, process_pool_context
 from pywp.uncertainty import (
     DEFAULT_PLANNING_UNCERTAINTY_MODEL,
     PlanningUncertaintyModel,
@@ -4305,6 +4305,7 @@ def _display_geometry_sampling_model(
     )
 
 
+@calculation_budgeted
 def analyze_anti_collision(
     wells: list[AntiCollisionWell] | tuple[AntiCollisionWell, ...],
     *,
@@ -4349,6 +4350,7 @@ def _pair_cache_signature(
     )
 
 
+@calculation_budgeted
 def analyze_anti_collision_incremental(
     wells: list[AntiCollisionWell] | tuple[AntiCollisionWell, ...],
     *,
@@ -10003,7 +10005,7 @@ def _nullable_float(value: float | None) -> float | str:
     return float(value)
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/anticollision_rerun.py	62130
+===BEGIN_FILE===	pywp/anticollision_rerun.py	62218
 from __future__ import annotations
 
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
@@ -10049,7 +10051,7 @@ from pywp.anticollision_rerun_models import (
     TrajectoryOverrideSpec,
 )
 from pywp.models import OPTIMIZATION_ANTI_COLLISION_AVOIDANCE, OPTIMIZATION_MINIMIZE_KOP
-from pywp.parallel import process_pool_context
+from pywp.parallel import calculation_budgeted, process_pool_context
 from pywp.pilot_wells import paired_pilot_parent_names, well_name_key
 from pywp.reference_trajectories import (
     ImportedTrajectoryWell,
@@ -10309,6 +10311,7 @@ def reference_wells_in_anti_collision_scope(
     return tuple(scoped)
 
 
+@calculation_budgeted
 def build_anti_collision_analysis_for_successes(
     successes: list[SuccessfulWellPlan],
     *,
@@ -10354,6 +10357,7 @@ def build_anti_collision_analysis_for_successes(
     )
 
 
+@calculation_budgeted
 def build_incremental_anti_collision_analysis_for_successes(
     successes: list[SuccessfulWellPlan],
     *,
@@ -10413,6 +10417,7 @@ def build_incremental_anti_collision_analysis_for_successes(
     return analysis, well_cache, pair_cache, stats
 
 
+@calculation_budgeted
 def build_anti_collision_wells_for_successes(
     successes: list[SuccessfulWellPlan],
     *,
@@ -17445,7 +17450,7 @@ def _transition_problem_text(transition: MultiHorizontalTransition) -> str:
     )
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/pad_optimization.py	42156
+===BEGIN_FILE===	pywp/pad_optimization.py	42686
 from __future__ import annotations
 
 from concurrent.futures import ProcessPoolExecutor
@@ -17472,7 +17477,7 @@ from pywp.eclipse_welltrack import (
 )
 from pywp.multi_horizontal import extend_plan_with_multi_horizontal_targets
 from pywp.models import TrajectoryConfig
-from pywp.parallel import process_pool_context
+from pywp.parallel import calculation_budgeted, process_pool_context
 from pywp.planner import TrajectoryPlanner
 from pywp.reference_trajectories import (
     ImportedTrajectoryWell,
@@ -18153,6 +18158,7 @@ def _swap_surfaces_and_recalculate(
     return new_records, new_successes
 
 
+@calculation_budgeted
 def optimize_pad_order(
     records: list[WelltrackRecord],
     success_dict: dict[str, SuccessfulWellPlan],
@@ -18207,16 +18213,6 @@ def optimize_pad_order(
         return records, success_dict, False
 
     ref_wells = tuple(reference_wells)
-    # Use a Streamlit-safe context: spawn on Windows/macOS, forkserver on Linux.
-    _mp_ctx = process_pool_context()
-    try:
-        pool: ProcessPoolExecutor | None = ProcessPoolExecutor(
-            max_workers=2,
-            mp_context=_mp_ctx,
-        )
-    except (BrokenProcessPool, PicklingError, OSError, RuntimeError, ValueError):
-        pool = None
-
     # --- Pre-build lightweight AC wells (no display geometry). ---
     # Reused across candidates; only swapped wells are rebuilt.
     current_signatures = {
@@ -18328,7 +18324,19 @@ def optimize_pad_order(
 
     progress_callback(0, f"Начальный score: {_score_text(best_score)}.")
 
+    pool: ProcessPoolExecutor | None = None
+    pool_workers = 0
     try:
+        # Serial means serial. Create the trajectory pool only after initial
+        # validation/AC succeeds, and cover its entire lifetime with finally.
+        if int(parallel_workers) > 1:
+            try:
+                pool_workers = min(int(parallel_workers), 2)
+                pool = ProcessPoolExecutor(
+                    max_workers=pool_workers, mp_context=process_pool_context(),
+                )
+            except (BrokenProcessPool, PicklingError, OSError, RuntimeError, ValueError):
+                pool_workers = 0
         for iteration in range(1, _MAX_ITERATIONS + 1):
             if evaluated_candidate_count >= _MAX_CANDIDATE_EVALUATIONS:
                 stopped_by_budget = True
@@ -18489,7 +18497,10 @@ def optimize_pad_order(
                             ref_ac_wells,
                             well_signature_by_name=cand_signatures,
                             previous_pair_cache=current_pair_cache,
-                            parallel_workers=int(parallel_workers),
+                            # The reusable trajectory pool still owns these
+                            # processes while AC runs; do not double-count them
+                            # as available slots for a second pool.
+                            parallel_workers=max(int(parallel_workers) - pool_workers, 0),
                         )
                     )
                     cand_score = _optimization_score(
@@ -18592,14 +18603,109 @@ def optimize_pad_order(
     return best_records, best_successes, improved
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/parallel.py	1194
+===BEGIN_FILE===	pywp/parallel.py	4428
 from __future__ import annotations
 
+import inspect
 import multiprocessing
 import sys
+import threading
+from collections import deque
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from functools import wraps
 from multiprocessing.context import BaseContext
+from typing import Any, TypeVar, cast
 
-__all__ = ["process_pool_context", "process_pool_start_method"]
+__all__ = [
+    "CALCULATION_WORKER_LIMIT",
+    "calculation_budgeted",
+    "calculation_worker_budget",
+    "process_pool_context",
+    "process_pool_start_method",
+]
+
+
+# This limit is process-local by design: each deployed app instance has its
+# own Python process.  It bounds concurrent heavy calculations inside that
+# instance. Four matches the existing batch/AC automatic worker ceiling.
+CALCULATION_WORKER_LIMIT = 4
+_budget_condition = threading.Condition()
+_budget_in_use = 0
+_budget_waiters: deque[object] = deque()
+_budget_local = threading.local()
+_F = TypeVar("_F", bound=Callable[..., Any])
+
+
+@contextmanager
+def calculation_worker_budget(requested_workers: int) -> Iterator[int]:
+    """Reserve the shared worker budget and yield the effective worker count.
+
+    A serial calculation reserves one slot as well, so a parallel operation
+    cannot overlap with an unbounded number of serial CPU-heavy operations.
+    Nested calls from one operation reuse its reservation; this is needed for
+    the anti-collision pipeline (well build -> pair analysis).
+    """
+
+    global _budget_in_use
+
+    requested = max(int(requested_workers), 0)
+    active_depth = int(getattr(_budget_local, "depth", 0) or 0)
+    if active_depth:
+        inherited = int(_budget_local.grant)
+        grant = min(max(requested, 1), inherited)
+        _budget_local.depth = active_depth + 1
+        _budget_local.grant = grant
+        try:
+            yield min(requested, grant)
+        finally:
+            _budget_local.depth = active_depth
+            _budget_local.grant = inherited
+        return
+
+    demand = max(requested, 1)
+    ticket = object()
+    with _budget_condition:
+        _budget_waiters.append(ticket)
+        try:
+            while (
+                _budget_waiters[0] is not ticket
+                or _budget_in_use >= CALCULATION_WORKER_LIMIT
+            ):
+                _budget_condition.wait()
+            grant = min(demand, CALCULATION_WORKER_LIMIT - _budget_in_use)
+            _budget_in_use += grant
+        finally:
+            _budget_waiters.remove(ticket)
+            _budget_condition.notify_all()
+    _budget_local.depth = 1
+    _budget_local.grant = grant
+    try:
+        yield min(requested, grant)
+    finally:
+        _budget_local.depth = 0
+        _budget_local.grant = 0
+        with _budget_condition:
+            _budget_in_use -= grant
+            _budget_condition.notify_all()
+
+
+def calculation_budgeted(function: _F) -> _F:
+    """Decorate a public heavy calculation with the shared worker budget."""
+
+    signature = inspect.signature(function)
+
+    @wraps(function)
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        bound = signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        requested = int(bound.arguments.get("parallel_workers", 0) or 0)
+        with calculation_worker_budget(requested) as effective:
+            if "parallel_workers" in bound.arguments:
+                bound.arguments["parallel_workers"] = int(effective)
+            return function(*bound.args, **bound.kwargs)
+
+    return cast(_F, wrapped)
 
 
 def process_pool_start_method(platform: str | None = None) -> str:
@@ -26964,122 +27070,3 @@ def _turn_scalar_cost(
         target_point=target_point,
         config=config,
     )
-    return float(miss * 1e6 + candidate.md_total_m)
-
-
-def _fixed_turn_search_components(
-    *,
-    bounds: tuple[tuple[float, float], ...],
-    split_build: bool,
-    fixed_kop_vertical_m: float | None,
-) -> dict[int, float]:
-    if fixed_kop_vertical_m is None:
-        return {}
-    kop_index = 2 if split_build else 1
-    if kop_index >= len(bounds):
-        return {}
-    lower, upper = bounds[kop_index]
-    return {
-        kop_index: float(
-            np.clip(float(fixed_kop_vertical_m), float(lower), float(upper))
-        )
-    }
-
-
-def _apply_fixed_search_components_to_vector(
-    *,
-    vector: np.ndarray,
-    bounds: tuple[tuple[float, float], ...],
-    fixed_components: dict[int, float],
-) -> np.ndarray:
-    normalized = _clip_to_bounds(np.asarray(vector, dtype=float), bounds=bounds)
-    for index, value in fixed_components.items():
-        lower, upper = bounds[int(index)]
-        normalized[int(index)] = float(
-            np.clip(float(value), float(lower), float(upper))
-        )
-    return normalized
-
-
-def _turn_least_squares_probes(
-    *,
-    seed_vector: np.ndarray,
-    fixed_components: dict[int, float],
-    bounds: tuple[tuple[float, float], ...],
-    profile_builder: Callable[[np.ndarray], ProfileParameters | None],
-    target_point: np.ndarray,
-    config: TrajectoryConfig,
-    max_nfev: int,
-) -> list[np.ndarray]:
-    seed = _apply_fixed_search_components_to_vector(
-        vector=np.asarray(seed_vector, dtype=float),
-        bounds=bounds,
-        fixed_components=fixed_components,
-    )
-    fixed = {int(index): float(value) for index, value in fixed_components.items()}
-    free_indices = [index for index in range(len(bounds)) if index not in fixed]
-    if not free_indices:
-        return [seed]
-
-    lower = np.array([bounds[index][0] for index in free_indices], dtype=float)
-    upper = np.array([bounds[index][1] for index in free_indices], dtype=float)
-    x0 = np.array([seed[index] for index in free_indices], dtype=float)
-
-    def _compose(free_values: np.ndarray) -> np.ndarray:
-        full = seed.copy()
-        for index, value in fixed.items():
-            full[index] = float(value)
-        for free_index, value in zip(
-            free_indices, np.asarray(free_values, dtype=float)
-        ):
-            full[free_index] = float(value)
-        return _apply_fixed_search_components_to_vector(
-            vector=full,
-            bounds=bounds,
-            fixed_components=fixed,
-        )
-
-    solution = least_squares(
-        fun=lambda free_values: _turn_residuals(
-            values=_compose(np.asarray(free_values, dtype=float)),
-            profile_builder=profile_builder,
-            target_point=target_point,
-            config=config,
-        ),
-        x0=x0,
-        bounds=(lower, upper),
-        method="trf",
-        jac="2-point",
-        x_scale="jac",
-        ftol=1e-10,
-        xtol=1e-10,
-        gtol=1e-10,
-        max_nfev=int(max(max_nfev, 20)),
-    )
-
-    probes = [_compose(x0)]
-    if bool(solution.success) and np.all(np.isfinite(solution.x)):
-        probes.append(_compose(np.asarray(solution.x, dtype=float)))
-    return _dedupe_seed_vectors(probes)
-
-
-def _slsqp_search_probes(
-    *,
-    seed_vector: np.ndarray,
-    fixed_components: dict[int, float],
-    bounds: tuple[tuple[float, float], ...],
-    objective: Callable[[np.ndarray], float],
-    constraint_functions: tuple[Callable[[np.ndarray], float], ...],
-    maxiter: int,
-) -> list[np.ndarray]:
-    seed = _apply_fixed_search_components_to_vector(
-        vector=np.asarray(seed_vector, dtype=float),
-        bounds=bounds,
-        fixed_components=fixed_components,
-    )
-    fixed = {int(index): float(value) for index, value in fixed_components.items()}
-    free_indices = [index for index in range(len(bounds)) if index not in fixed]
-    if not free_indices:
-        return [seed]
-
-    reduced_bounds = [bounds[index] for index in free_indices]

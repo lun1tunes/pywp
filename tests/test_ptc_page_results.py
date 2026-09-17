@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from io import BytesIO
 from types import SimpleNamespace
 
 import numpy as np
@@ -10,8 +11,10 @@ from pywp import ptc_core
 from pywp import ptc_page_results
 from pywp import welltrack_batch
 from pywp.anticollision import AntiCollisionAnalysis
+from pywp.coordinate_integration import transform_stations_to_crs
 from pywp.coordinate_systems import CoordinateSystem
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
+from pywp.ui_well_panels import survey_export_dataframe, survey_export_excel_bytes
 
 
 class _RerunRequested(Exception):
@@ -2075,10 +2078,22 @@ def test_render_success_tabs_hides_plotly_panels_for_single_well_constructor(
     assert calls["plots_kwargs"]["show_plotly_panels"] is True
 
 
-def test_render_success_tabs_passes_true_and_grid_azimuths_to_single_well_export(
+@pytest.mark.parametrize(
+    "target_crs,auto_convert",
+    [
+        (CoordinateSystem.PULKOVO_1942_GK_13N, True),
+        (CoordinateSystem.WGS84_UTM_ZONE_43N, True),
+        (CoordinateSystem.WGS84, True),
+        (CoordinateSystem.WGS84, False),
+    ],
+)
+def test_render_success_tabs_passes_azimuths_and_source_xy_to_single_well_export(
     monkeypatch: pytest.MonkeyPatch,
+    target_crs: CoordinateSystem,
+    auto_convert: bool,
 ) -> None:
     calls: dict[str, object] = {}
+    source_crs = CoordinateSystem.PULKOVO_1942_GK_13N
     success = SimpleNamespace(
         name="WELL-A",
         surface=SimpleNamespace(x=0.0, y=0.0, z=0.0),
@@ -2088,8 +2103,8 @@ def test_render_success_tabs_passes_true_and_grid_azimuths_to_single_well_export
         stations=pd.DataFrame(
             {
                 "MD_m": [0.0, 1000.0],
-                "X_m": [0.0, 200.0],
-                "Y_m": [0.0, 0.0],
+                "X_m": [500000.0, 500200.0],
+                "Y_m": [6500000.0, 6500100.0],
                 "Z_m": [0.0, 1100.0],
                 "INC_deg": [0.0, 90.0],
                 "AZI_deg": [0.0, 90.0],
@@ -2120,19 +2135,14 @@ def test_render_success_tabs_passes_true_and_grid_azimuths_to_single_well_export
     monkeypatch.setattr(
         ptc_page_results,
         "get_input_crs",
-        lambda: CoordinateSystem.PULKOVO_1942_ZONE_16,
+        lambda: source_crs,
     )
     monkeypatch.setattr(
         ptc_page_results,
         "get_selected_crs",
-        lambda: CoordinateSystem.PULKOVO_1942_ZONE_16,
+        lambda: target_crs,
     )
-    monkeypatch.setattr(ptc_page_results, "should_auto_convert", lambda: False)
-    monkeypatch.setattr(
-        ptc_page_results,
-        "csv_export_crs",
-        lambda *_args, **_kwargs: CoordinateSystem.PULKOVO_1942_ZONE_16,
-    )
+    monkeypatch.setattr(ptc_page_results, "should_auto_convert", lambda: auto_convert)
     monkeypatch.setattr(ptc_page_results.wt, "_well_color_map", lambda _records: {})
     monkeypatch.setattr(
         ptc_page_results.wt,
@@ -2177,6 +2187,31 @@ def test_render_success_tabs_passes_true_and_grid_azimuths_to_single_well_export
     table_kwargs = calls["table_kwargs"]
     assert table_kwargs["survey_export_azi_true_deg"].tolist() == [11.5, 22.5]
     assert table_kwargs["survey_export_azi_grid_deg"].tolist() == [9.5, 19.5]
+    export_stations = table_kwargs["survey_export_stations"]
+    assert export_stations is not success.stations
+    payload = survey_export_excel_bytes(
+        survey_export_dataframe(
+            export_stations,
+            xy_label_suffix=table_kwargs["survey_export_xy_label_suffix"],
+            xy_unit=table_kwargs["survey_export_xy_unit"],
+        )
+    )
+    exported = pd.read_excel(BytesIO(payload))
+    np.testing.assert_array_equal(exported["N_m"], success.stations["Y_m"])
+    np.testing.assert_array_equal(exported["E_m"], success.stations["X_m"])
+    expected = success.stations
+    if auto_convert and target_crs != source_crs:
+        expected = transform_stations_to_crs(
+            success.stations, target_crs, source_crs, rename_columns=False
+        )
+    np.testing.assert_allclose(
+        export_stations[["X_m", "Y_m"]],
+        expected[["X_m", "Y_m"]],
+        rtol=0.0,
+        atol=1e-8,
+    )
+    assert "N_m" not in success.stations
+    assert "E_m" not in success.stations
 
 
 def test_render_success_tabs_keeps_single_well_plots_when_calc_params_are_stale(

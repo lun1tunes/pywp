@@ -841,6 +841,9 @@ def test_handle_three_edit_event_ignores_duplicate_nonce() -> None:
         bump_three_viewer_nonce=bump_nonce,
     )
     assert session_state["wt_last_edit_targets_nonce"] == "nonce-1"
+    assert session_state["wt_three_edit_ack"] == {
+        "nonce": "nonce-1", "status": "applied"
+    }
     assert applied == [([{"name": "WELL-A"}], "three_viewer")]
     assert bumped == 1
 
@@ -852,6 +855,89 @@ def test_handle_three_edit_event_ignores_duplicate_nonce() -> None:
     )
     assert len(applied) == 1
     assert bumped == 1
+
+
+def test_three_edit_noop_is_acknowledged_once_without_geometry_refresh() -> None:
+    state = {}
+    applied = []
+    event = {"type": "pywp:editTargets", "nonce": "noop", "changes": []}
+
+    def apply(changes, source):
+        applied.append(changes)
+        return []
+
+    def bump():
+        raise AssertionError("no-op must not invalidate the scene")
+
+    assert ptc_edit_targets.handle_three_edit_event(
+        state, event, apply_changes=apply, bump_three_viewer_nonce=bump
+    )
+    assert state["wt_three_edit_ack"] == {"nonce": "noop", "status": "noop"}
+    assert not ptc_edit_targets.handle_three_edit_event(
+        state, event, apply_changes=apply, bump_three_viewer_nonce=bump
+    )
+    assert applied == [[]]
+
+
+def test_three_edit_failure_is_acknowledged_without_retrying_same_operation() -> None:
+    state = {}
+    attempts = []
+    event = {"type": "pywp:editTargets", "nonce": "failed", "changes": []}
+
+    def apply(changes, source):
+        attempts.append(changes)
+        raise ValueError("invalid edit")
+
+    assert ptc_edit_targets.handle_three_edit_event(
+        state, event, apply_changes=apply, bump_three_viewer_nonce=lambda: None
+    )
+    assert state["wt_three_edit_ack"]["nonce"] == "failed"
+    assert state["wt_three_edit_ack"]["status"] == "error"
+    assert not ptc_edit_targets.handle_three_edit_event(
+        state, event, apply_changes=apply, bump_three_viewer_nonce=lambda: None
+    )
+    assert attempts == [[]]
+
+
+def test_three_edit_replays_ack_but_never_reapplies_an_older_operation() -> None:
+    state = {}
+    applied = []
+
+    def apply(changes, source):
+        applied.append(changes)
+        return ["WELL-A"]
+
+    def deliver(nonce):
+        return ptc_edit_targets.handle_three_edit_event(
+            state, {"type": "pywp:editTargets", "nonce": nonce, "changes": [nonce]},
+            apply_changes=apply, bump_three_viewer_nonce=lambda: None,
+        )
+
+    assert deliver("first")
+    assert deliver("second")
+    assert deliver("first")
+    assert not deliver("first")
+    assert applied == [["first"], ["second"]]
+    assert state["wt_three_edit_ack"] == {"nonce": "first", "status": "applied"}
+
+
+def test_three_edit_acknowledgements_are_scoped_to_their_viewers() -> None:
+    state = {}
+
+    def deliver(viewer):
+        return ptc_edit_targets.handle_three_edit_event(
+            state, {"type": "pywp:editTargets", "nonce": viewer, "changes": []},
+            apply_changes=lambda *_args: [], bump_three_viewer_nonce=lambda: None,
+            ack_key=f"ack:{viewer}",
+        )
+
+    assert deliver("first-viewer")
+    assert deliver("second-viewer")
+    for _ in range(3):
+        assert not deliver("first-viewer")
+        assert not deliver("second-viewer")
+    assert state["ack:first-viewer"]["nonce"] == "first-viewer"
+    assert state["ack:second-viewer"]["nonce"] == "second-viewer"
 
 
 def test_handle_three_edit_event_accepts_pad_changes() -> None:
@@ -891,3 +977,91 @@ def test_handle_three_edit_event_accepts_pad_changes() -> None:
         ([{"pad_id": "PAD-1", "anchor": [10.0, 20.0, 0.0]}], "three_viewer")
     ]
     assert bumped == 1
+
+
+def test_three_edit_transaction_does_not_publish_targets_when_pad_stage_fails() -> None:
+    records = [_record(), _record("WELL-B")]
+    untouched_cache = {"expensive": object()}
+    state = {
+        "wt_records": records,
+        "wt_records_original": records,
+        "wt_anticollision_analysis_cache": untouched_cache,
+    }
+    before = dict(state)
+
+    def fail_pad(staged, changes, source):
+        assert staged["wt_records"][0].points[2].x == 1600
+        assert state["wt_records"] is records
+        raise ValueError("pad planning failed")
+
+    with pytest.raises(ValueError, match="pad planning failed"):
+        ptc_edit_targets.apply_three_edit_transaction(
+            state,
+            [{"name": "WELL-A", "points": [{"index": 2, "position": [1600, 2000, 2500]}]}],
+            [], source="three_viewer", base_row_factory=_base_row,
+            apply_pad_changes=fail_pad,
+        )
+    assert state.keys() == before.keys()
+    assert all(state[key] is value for key, value in before.items())
+
+
+def test_three_edit_transaction_commit_preserves_untouched_records_and_cache() -> None:
+    records = [_record(), _record("WELL-B")]
+    cache = {"result": object()}
+    state = {"wt_records": records, "wt_records_original": records,
+             "wt_anticollision_analysis_cache": cache}
+    updated = ptc_edit_targets.apply_three_edit_transaction(
+        state,
+        [{"name": "WELL-A", "points": [{"index": 2, "position": [1600, 2000, 2500]}]}],
+        [], source="three_viewer", base_row_factory=_base_row,
+        apply_pad_changes=lambda *_args: [],
+    )
+    assert updated == ["WELL-A"]
+    assert state["wt_records"][0].points[2].x == 1600
+    assert state["wt_records"][1] is records[1]
+    assert state["wt_anticollision_analysis_cache"] is cache
+    assert records[0].points[2].x == 1500
+
+
+@pytest.mark.parametrize("bad_change", [
+    {"name": "missing", "t1": [0, 0, 0], "t3": [1, 1, 1]},
+    {"name": "WELL-A", "points": [{"index": 99, "position": [1, 1, 1]}]},
+    {"name": "WELL-A", "points": [{"index": 2, "position": [1, float("nan"), 1]}]},
+    {"name": "WELL-A", "sidetrack_window": {"kind": "md", "value_m": "bad"}},
+    {"name": "WELL-A"},
+])
+def test_three_edit_transaction_rejects_partial_invalid_changes(bad_change) -> None:
+    records = [_record()]
+    state = {"wt_records": records}
+    with pytest.raises(ValueError):
+        ptc_edit_targets.apply_three_edit_transaction(
+            state, [bad_change], [], source="three_viewer",
+            base_row_factory=_base_row, apply_pad_changes=lambda *_args: [],
+        )
+    assert state == {"wt_records": records}
+    assert state["wt_records"] is records
+
+
+def test_three_edit_transaction_rolls_back_if_session_commit_rejects_a_key() -> None:
+    class RejectOnce(dict):
+        rejected = False
+
+        def __setitem__(self, key, value):
+            if key == "wt_edit_targets_pending_names" and not self.rejected:
+                self.rejected = True
+                raise RuntimeError("session write rejected")
+            super().__setitem__(key, value)
+
+    records = [_record()]
+    state = RejectOnce(wt_records=records, wt_records_original=records)
+    before = dict(state)
+    with pytest.raises(RuntimeError, match="session write rejected"):
+        ptc_edit_targets.apply_three_edit_transaction(
+            state,
+            [{"name": "WELL-A", "points": [{"index": 2, "position": [1600, 2000, 2500]}]}],
+            [], source="three_viewer", base_row_factory=_base_row,
+            apply_pad_changes=lambda *_args: [],
+        )
+    assert state.rejected
+    assert state.keys() == before.keys()
+    assert all(state[key] is value for key, value in before.items())

@@ -1,3 +1,394 @@
+                "symbol": "circle",
+                "hover": [
+                    {
+                        "name": "Окно зарезки",
+                        "point": "Окно",
+                    }
+                ],
+                "role": "marker",
+            }
+        )
+        payload["labels"].append(
+            _point_payload_label(
+                "Окно",
+                window_point,
+                "#4B5563",
+                role="control_point_label",
+            )
+        )
+
+    _append_single_well_zero_axes(
+        payload,
+        surface=surface,
+        x_arrays=x_arrays,
+        y_arrays=y_arrays,
+        z_arrays=z_arrays,
+    )
+    payload["bounds"] = _bounds_from_arrays(x_arrays=x_arrays, y_arrays=y_arrays, z_arrays=z_arrays)
+    return ptc_three_payload.optimize_three_payload(payload)
+
+
+def single_well_target_only_three_payload(
+    *,
+    surface: Point3D,
+    t1: Point3D,
+    t3: Point3D,
+    well_name: str = "single_well",
+    color: str = TARGET_COLOR_PRIMARY,
+) -> dict[str, object]:
+    x_arrays: list[np.ndarray] = []
+    y_arrays: list[np.ndarray] = []
+    z_arrays: list[np.ndarray] = []
+    payload = _base_payload(title="3D цели (без траектории)")
+    marker_name = f"{well_name}: цели (без траектории)"
+    target_points, target_labels = _target_marker_points_and_labels(
+        surface=surface,
+        t1=t1,
+        t3=t3,
+    )
+    _append_target_markers(
+        payload,
+        name=marker_name,
+        surface=surface,
+        t1=t1,
+        t3=t3,
+        color=color,
+        size=8.0,
+        symbol="cross",
+        x_arrays=x_arrays,
+        y_arrays=y_arrays,
+        z_arrays=z_arrays,
+    )
+    for label, point in zip(target_labels, target_points, strict=False):
+        payload["labels"].append(
+            _point_payload_label(
+                str(label),
+                point,
+                str(color),
+                role="target_label",
+            )
+        )
+    _append_unique_legend_item(
+        payload,
+        label=marker_name,
+        color=str(color),
+        opacity=1.0,
+        symbol="point",
+    )
+    _append_single_well_zero_axes(
+        payload,
+        surface=surface,
+        x_arrays=x_arrays,
+        y_arrays=y_arrays,
+        z_arrays=z_arrays,
+    )
+    payload["bounds"] = _bounds_from_arrays(
+        x_arrays=x_arrays,
+        y_arrays=y_arrays,
+        z_arrays=z_arrays,
+    )
+    return ptc_three_payload.optimize_three_payload(payload)
+
+
+def all_wells_three_payload(
+    successes: list[SuccessfulWellPlan],
+    *,
+    target_only_wells: list[object] | None = None,
+    reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
+    name_to_color: Mapping[str, str] | None = None,
+    display_name_by_well_name: Mapping[str, str] | None = None,
+    pilot_study_points_by_name: Mapping[str, tuple[Point3D, ...]] | None = None,
+    focus_well_names: tuple[str, ...] = (),
+    render_mode: str = WT_3D_RENDER_FAST,
+    fallback_color: Callable[[int], str] | None = None,
+) -> dict[str, object]:
+    payload = _base_payload(title="Все рассчитанные скважины (3D)")
+    x_arrays: list[np.ndarray] = []
+    y_arrays: list[np.ndarray] = []
+    z_arrays: list[np.ndarray] = []
+    x_focus_arrays: list[np.ndarray] = []
+    y_focus_arrays: list[np.ndarray] = []
+    z_focus_arrays: list[np.ndarray] = []
+    focus_set = _clean_name_set(focus_well_names)
+    color_map = dict(name_to_color or {})
+    pilot_points_map = dict(pilot_study_points_by_name or {})
+    highlighted_reference_well_names = _overview_highlight_reference_well_names(
+        successes=successes,
+        reference_wells=reference_wells,
+    )
+
+    for index, success in enumerate(successes):
+        well_name = str(success.name)
+        is_pilot = is_pilot_name(well_name)
+        display_name = (
+            well_name
+            if is_pilot
+            else _display_well_name(
+                well_name,
+                display_name_by_well_name=display_name_by_well_name,
+            )
+        )
+        color = color_map.get(well_name, _fallback_color(index, fallback_color))
+        pilot_study_points = (
+            _pilot_study_points_for_well(
+                well_name,
+                pilot_points_map,
+                fallback_points=(success.t1, success.t3),
+            )
+            if is_pilot
+            else ()
+        )
+        stations = _maybe_decimated_stations(
+            success.stations,
+            render_mode=render_mode,
+            target_points=WT_3D_FAST_CALC_TARGET_POINTS,
+        )
+        _append_station_line(
+            payload,
+            stations=stations,
+            name=well_name,
+            color=color,
+            width_role="line",
+            dash="solid",
+            hover_name=well_name,
+            x_arrays=x_arrays,
+            y_arrays=y_arrays,
+            z_arrays=z_arrays,
+            focus_arrays=(x_focus_arrays, y_focus_arrays, z_focus_arrays)
+            if _include_name_in_focus(well_name, focus_set)
+            else None,
+        )
+        _append_target_markers(
+            payload,
+            name=f"{well_name}: цели",
+            surface=success.surface,
+            t1=success.t1,
+            t3=success.t3,
+            target_pairs=tuple(getattr(success, "target_pairs", ()) or ()),
+            target_points=pilot_study_points,
+            target_labels=_pilot_study_label_texts(
+                well_name,
+                len(pilot_study_points),
+            )
+            if is_pilot
+            else (),
+            color=color,
+            size=5.0,
+            symbol="circle",
+            x_arrays=x_arrays,
+            y_arrays=y_arrays,
+            z_arrays=z_arrays,
+            focus_arrays=(x_focus_arrays, y_focus_arrays, z_focus_arrays)
+            if _include_name_in_focus(well_name, focus_set)
+            else None,
+        )
+        payload["labels"].append(_well_name_label(display_name, success.t3, color))
+        if pilot_study_points:
+            _append_pilot_study_labels(
+                payload,
+                pilot_name=well_name,
+                study_points=pilot_study_points,
+                color=color,
+            )
+        _append_unique_legend_item(payload, label=well_name, color=color, opacity=1.0)
+
+    _append_reference_wells(
+        payload,
+        reference_wells=reference_wells,
+        render_mode=render_mode,
+        x_arrays=x_arrays,
+        y_arrays=y_arrays,
+        z_arrays=z_arrays,
+        highlighted_names=highlighted_reference_well_names,
+    )
+    default_reference_label_keys = (
+        {
+            _reference_identity_key(well)
+            for well in reference_wells
+            if well_name_key(getattr(well, "name", "")) in highlighted_reference_well_names
+        }
+        if str(render_mode).strip() == WT_3D_RENDER_FAST
+        else {_reference_identity_key(well) for well in reference_wells}
+    )
+    _set_optional_reference_name_labels(
+        payload,
+        [
+            well
+            for well in reference_wells
+            if _reference_identity_key(well) not in default_reference_label_keys
+        ],
+    )
+
+    for target_only in target_only_wells or ():
+        well_name = str(getattr(target_only, "name"))
+        color = color_map.get(well_name, "#6B7280")
+        target_points = tuple(getattr(target_only, "target_points", ()) or ())
+        target_labels = tuple(getattr(target_only, "target_labels", ()) or ())
+        target_focus_arrays = (
+            (x_focus_arrays, y_focus_arrays, z_focus_arrays)
+            if _include_target_only_in_focus(
+                well_name=well_name,
+                focus_set=focus_set,
+                target_points=target_points,
+                target_labels=target_labels,
+            )
+            else None
+        )
+        _append_target_markers(
+            payload,
+            name=f"{well_name}: цели (без траектории)",
+            surface=getattr(target_only, "surface"),
+            t1=getattr(target_only, "t1"),
+            t3=getattr(target_only, "t3"),
+            target_pairs=tuple(getattr(target_only, "target_pairs", ()) or ()),
+            target_points=target_points,
+            target_labels=target_labels,
+            color=color,
+            size=10.0,
+            symbol="cross",
+            x_arrays=x_arrays,
+            y_arrays=y_arrays,
+            z_arrays=z_arrays,
+            focus_arrays=target_focus_arrays,
+            hover_extra={
+                "status": str(getattr(target_only, "status", "") or ""),
+                "problem": str(getattr(target_only, "problem", "") or ""),
+            },
+        )
+        payload["labels"].append(_well_name_label(well_name, getattr(target_only, "t3"), color))
+        _append_unique_legend_item(
+            payload,
+            label=f"{well_name}: цели (без траектории)",
+            color=color,
+            opacity=1.0,
+            symbol="point",
+        )
+
+    payload["bounds"] = _bounds_from_arrays(
+        x_arrays=x_focus_arrays or x_arrays,
+        y_arrays=y_focus_arrays or y_arrays,
+        z_arrays=z_focus_arrays or z_arrays,
+    )
+    return ptc_three_payload.optimize_three_payload(payload)
+
+
+def _include_target_only_in_focus(
+    *,
+    well_name: str,
+    focus_set: set[str],
+    target_points: tuple[Point3D, ...],
+    target_labels: tuple[str, ...],
+) -> bool:
+    if _include_name_in_focus(well_name, focus_set):
+        return True
+    if not focus_set:
+        return True
+    # ZBS has no source wellhead in target records and is intentionally not a
+    # pad member. Keep its two editable targets in camera bounds for focused
+    # views so a failed sidetrack can still be fixed from 3D.
+    labels = tuple(label.lower() for label in target_labels)
+    return len(target_points) == 2 and labels == ("t1", "t3")
+
+
+def anticollision_three_payload(
+    analysis: AntiCollisionAnalysis,
+    *,
+    previous_successes_by_name: Mapping[str, SuccessfulWellPlan] | None = None,
+    target_only_wells: list[object] | None = None,
+    reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
+    name_to_color: Mapping[str, str] | None = None,
+    display_name_by_well_name: Mapping[str, str] | None = None,
+    pilot_study_points_by_name: Mapping[str, tuple[Point3D, ...]] | None = None,
+    focus_well_names: tuple[str, ...] = (),
+    render_mode: str = WT_3D_RENDER_FAST,
+    show_sidetrack_relative_cones: bool = False,
+) -> dict[str, object]:
+    payload = _base_payload(title="Anti-collision: 3D конусы неопределённости")
+    payload["anti_collision_layer_state"] = {
+        "cones": True,
+        "overlaps": True,
+        "segments": True,
+        "sidetrack_relative_cones": bool(show_sidetrack_relative_cones),
+    }
+    x_arrays: list[np.ndarray] = []
+    y_arrays: list[np.ndarray] = []
+    z_arrays: list[np.ndarray] = []
+    x_focus_arrays: list[np.ndarray] = []
+    y_focus_arrays: list[np.ndarray] = []
+    z_focus_arrays: list[np.ndarray] = []
+    focus_set = _clean_name_set(focus_well_names)
+    color_map = dict(name_to_color or {})
+    pilot_points_map = dict(pilot_study_points_by_name or {})
+    loaded_reference_wells = tuple(reference_wells)
+    analysis_reference_objects = tuple(
+        well for well in analysis.wells if bool(well.is_reference_only)
+    )
+    collision_display_overlays = collision_display_overlays_by_well(analysis)
+    focus_reference_names = (
+        _anticollision_reference_cone_focus_names(analysis)
+        if str(render_mode).strip() == WT_3D_RENDER_FAST
+        else set()
+    )
+    well_lookup = {str(well.name): well for well in analysis.wells}
+    aggregated_reference_wells: list[object] = []
+
+    for well in analysis.wells:
+        well_name = str(well.name)
+        is_pilot = is_pilot_name(well_name)
+        display_name = (
+            well_name
+            if is_pilot
+            else _display_well_name(
+                well_name,
+                display_name_by_well_name=display_name_by_well_name,
+            )
+        )
+        overlay = collision_display_overlays.get(well_name, well.overlay)
+        is_reference_only = bool(well.is_reference_only)
+        is_focus_reference = well_name in focus_reference_names
+        if (
+            str(render_mode).strip() == WT_3D_RENDER_FAST
+            and is_reference_only
+            and not is_focus_reference
+        ):
+            aggregated_reference_wells.append(well)
+            continue
+        well_label = _analysis_well_label(well)
+        include_in_focus = (not focus_set and not is_reference_only) or (
+            bool(focus_set) and well_name in focus_set
+        )
+        focus_arrays = (
+            (x_focus_arrays, y_focus_arrays, z_focus_arrays)
+            if include_in_focus
+            else None
+        )
+        tube_mesh = (
+            build_uncertainty_tube_mesh(overlay)
+            if (
+                str(render_mode).strip() != WT_3D_RENDER_FAST
+                or not is_reference_only
+                or is_focus_reference
+            )
+            else None
+        )
+        if tube_mesh is not None:
+            _append_mesh(
+                payload,
+                vertices_xyz=tube_mesh.vertices_xyz,
+                faces_ijk=np.column_stack([tube_mesh.i, tube_mesh.j, tube_mesh.k]),
+                name=f"{well_label} cone",
+                color=str(well.color),
+                opacity=0.10,
+                role="cone",
+                x_arrays=x_arrays,
+                y_arrays=y_arrays,
+                z_arrays=z_arrays,
+                focus_arrays=focus_arrays,
+            )
+        if overlay.samples and (
+            str(render_mode).strip() != WT_3D_RENDER_FAST or not is_reference_only
+        ):
+            terminal_ring = np.asarray(overlay.samples[-1].ring_xyz, dtype=float)
             _append_line_segments(
                 payload,
                 segments=[_points_from_xyz_array(terminal_ring)],
@@ -4583,7 +4974,7 @@ def _coerce_table_float(value: object, *, field_name: str, row_no: int) -> float
     return number
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/segments.py	13550
+===BEGIN_FILE===	pywp/segments.py	13869
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -4633,6 +5024,8 @@ def _make_md_grid(md_start: float, length_m: float, md_step_m: float) -> np.ndar
         raise ValueError("md_start, length_m and md_step_m must be numbers") from exc
     if not all(np.isfinite(value) for value in (md_start, length_m, md_step_m)):
         raise ValueError("md_start, length_m and md_step_m must be finite")
+    if md_start < 0.0:
+        raise ValueError("md_start must be non-negative")
     if length_m < 0.0:
         raise ValueError("length_m must be non-negative")
     if md_step_m <= 0.0:
@@ -4768,12 +5161,20 @@ class BuildSegment(Segment):
         return dogleg_deg / self.dls_deg_per_30m * 30.0
 
     def generate(self, md_start: float, md_step_m: float) -> pd.DataFrame:
-        md = _make_md_grid(md_start, self.length_m, md_step_m)
-        if self.length_m <= 1e-9:
+        length_m = self.length_m
+        md = _make_md_grid(md_start, length_m, md_step_m)
+        if self.interpolation_method not in (INTERPOLATION_SLERP, INTERPOLATION_RODRIGUES):
+            raise ValueError(
+                f"Unknown interpolation_method: {self.interpolation_method!r}. "
+                f"Expected {INTERPOLATION_SLERP!r} or {INTERPOLATION_RODRIGUES!r}."
+            )
+        # A representable positive length has both start and end MD stations,
+        # however small it is. Only an exactly zero length has one direction.
+        if length_m == 0.0:
             inc = np.array([self.inc_to_deg], dtype=float)
             azi = np.array([self.azi_to_deg], dtype=float)
         else:
-            t = (md - md_start) / self.length_m
+            t = (md - float(md_start)) / length_m
             t[0] = 0.0
             t[-1] = 1.0
             direction_from = _direction_vector(inc_deg=self.inc_from_deg, azi_deg=self.azi_from_deg)
@@ -4782,11 +5183,6 @@ class BuildSegment(Segment):
                 directions = _slerp_directions(direction_from=direction_from, direction_to=direction_to, t=t)
             elif self.interpolation_method == INTERPOLATION_RODRIGUES:
                 directions = _rodrigues_directions(direction_from=direction_from, direction_to=direction_to, t=t)
-            else:
-                raise ValueError(
-                    f"Unknown interpolation_method: {self.interpolation_method!r}. "
-                    f"Expected {INTERPOLATION_SLERP!r} or {INTERPOLATION_RODRIGUES!r}."
-                )
             inc, azi = _angles_from_directions(directions=directions)
 
         return pd.DataFrame(
@@ -6242,7 +6638,7 @@ DEFAULT_THREE_CAMERA: dict[str, dict[str, float]] = {
 }
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/three_viewer.py	4616
+===BEGIN_FILE===	pywp/three_viewer.py	4801
 from __future__ import annotations
 
 import json
@@ -6373,6 +6769,8 @@ def render_local_three_scene(
     height: int,
     instance_token: int = 0,
     key: str | None = None,
+    edit_ack: Mapping[str, object] | None = None,
+    dataset_revision: str = "",
 ) -> object:
     stable_key = str(key or payload.get("title") or "scene")
     payload_json, payload_digest, edit_channel = _serialized_payload(
@@ -6384,6 +6782,8 @@ def render_local_three_scene(
         payload_json=payload_json,
         payload_digest=payload_digest,
         runtime_digest=_viewer_runtime_digest(),
+        edit_ack=dict(edit_ack) if edit_ack else None,
+        dataset_revision=str(dataset_revision),
         has_anticollision_payload=bool(
             payload.get("anti_collision_layer_state")
             or payload.get("collisions")
@@ -7061,7 +7461,7 @@ class FastReplan {
 // window.updateLineGeometry = updateLineGeometry;
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/three_viewer_assets/index.html	9910
+===BEGIN_FILE===	pywp/three_viewer_assets/index.html	10637
 <!doctype html>
 <html lang="ru">
   <head>
@@ -7240,30 +7640,29 @@ class FastReplan {
           const nextPayloadDigest = String(nextArgs.payload_digest || "");
           const nextRuntimeDigest = String(nextArgs.runtime_digest || "");
           const payloadJson = String(nextArgs.payload_json || "{}");
+          const editAck = nextArgs.edit_ack || null;
           const nextHasAntiCollisionPayload = Boolean(
             nextArgs.has_anticollision_payload,
           );
           const instanceToken = Number(nextArgs.instance_token) || 0;
           renderGeneration += 1;
           const generation = renderGeneration;
-          bindChannel(nextArgs.channel || "");
+          const updateContext = {
+            datasetRevision: String(nextArgs.dataset_revision || ""),
+            onAccepted: function () {
+              bindChannel(nextArgs.channel || "");
+              currentPayloadDigest = nextPayloadDigest;
+              currentHasAntiCollisionPayload = nextHasAntiCollisionPayload;
+              setStatus("", false);
+            },
+          };
           frame.style.height = nextHeight + "px";
           post(SET_HEIGHT, { height: nextHeight });
-          if (
-            frame.srcdoc &&
-            nextPayloadDigest &&
-            nextPayloadDigest === currentPayloadDigest &&
-            nextRuntimeDigest === currentRuntimeDigest
-          ) {
-            setStatus("", false);
-            return;
-          }
           if (
             frameLoaded &&
             frame.srcdoc &&
             nextRuntimeDigest === currentRuntimeDigest &&
-            nextPayloadDigest &&
-            nextPayloadDigest !== currentPayloadDigest
+            nextPayloadDigest
           ) {
             setStatus("Обновление 3D...", false);
             window.requestAnimationFrame(function () {
@@ -7278,10 +7677,14 @@ class FastReplan {
                   nextHasAntiCollisionPayload &&
                   typeof frameWindow.__PYWP_VIEWER_APPLY_ANTICOLLISION_OVERLAY__ === "function"
                 ) {
-                  frameWindow.__PYWP_VIEWER_APPLY_ANTICOLLISION_OVERLAY__(
+                  const accepted = frameWindow.__PYWP_VIEWER_APPLY_ANTICOLLISION_OVERLAY__(
                     payloadJson,
                     nextPayloadDigest,
+                    editAck,
+                    updateContext,
                   );
+                  if (accepted === false) { setStatus("", false); return; }
+                  bindChannel(nextArgs.channel || "");
                   currentPayloadDigest = nextPayloadDigest;
                   currentHasAntiCollisionPayload = true;
                   setStatus("", false);
@@ -7292,7 +7695,9 @@ class FastReplan {
                   frameWindow &&
                   typeof frameWindow.__PYWP_VIEWER_UPDATE__ === "function"
                 ) {
-                  frameWindow.__PYWP_VIEWER_UPDATE__(payloadJson, nextPayloadDigest);
+                  const accepted = frameWindow.__PYWP_VIEWER_UPDATE__(payloadJson, nextPayloadDigest, editAck, updateContext);
+                  if (accepted === false) { setStatus("", false); return; }
+                  bindChannel(nextArgs.channel || "");
                   currentPayloadDigest = nextPayloadDigest;
                   currentHasAntiCollisionPayload = nextHasAntiCollisionPayload;
                   setStatus("", false);
@@ -7300,7 +7705,9 @@ class FastReplan {
                   return;
                 }
               } catch (_error) {
-                currentPayloadDigest = "";
+                // Do not reload the iframe and destroy a draft on update errors.
+                setStatus("Не удалось обновить 3D.", true);
+                return;
               }
               currentPayloadDigest = "";
               currentRuntimeDigest = "";
@@ -7325,12 +7732,14 @@ class FastReplan {
                 return;
               }
               frameLoaded = true;
+              frame.contentWindow.__PYWP_VIEWER_SET_DATASET_REVISION__(updateContext.datasetRevision);
               currentHasAntiCollisionPayload = nextHasAntiCollisionPayload;
               setStatus("", false);
               post(SET_HEIGHT, { height: nextHeight });
             };
             frameLoaded = false;
             currentPayloadDigest = nextPayloadDigest;
+            bindChannel(nextArgs.channel || "");
             frame.srcdoc = sceneHtml;
           } catch (error) {
             currentPayloadDigest = "";
@@ -7356,7 +7765,7 @@ class FastReplan {
 </html>
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/three_viewer_assets/templates/viewer_template.html	473109
+===BEGIN_FILE===	pywp/three_viewer_assets/templates/viewer_template.html	477342
 <!doctype html>
 <html lang="en">
   <head>
@@ -8314,29 +8723,6 @@ class FastReplan {
         font-size: 10px;
       }
 
-      .edit-pad-summary-row {
-        display: flex;
-        align-items: baseline;
-        justify-content: space-between;
-        gap: 10px;
-        color: #475569;
-        font-family: inherit;
-        font-size: 10px;
-      }
-
-      .edit-pad-summary-row strong {
-        color: #0f172a;
-        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-        font-size: 11px;
-        font-weight: 700;
-      }
-
-      .edit-pad-summary-total {
-        margin-top: 2px;
-        padding-top: 4px;
-        border-top: 1px solid rgba(15,23,42,0.08);
-      }
-
       #edit-inspector {
         display: none;
         position: static;
@@ -8368,6 +8754,14 @@ class FastReplan {
         color: #64748b;
         font-size: 10px;
         line-height: 1.3;
+      }
+
+      #edit-dataset-notice {
+        flex: 0 0 auto;
+        margin: 2px 10px 8px;
+        padding: 5px 8px;
+        border-top: 1px solid rgba(148,163,184,0.2);
+        line-height: 1.35;
       }
 
       .edit-inspector-input {
@@ -8500,49 +8894,6 @@ class FastReplan {
         color: #64748b;
         font-size: 10px;
         line-height: 1.35;
-      }
-
-      .edit-pad-wells {
-        display: flex;
-        flex-direction: column;
-        gap: 3px;
-        max-height: 150px;
-        overflow: auto;
-      }
-
-      .edit-pad-well-row {
-        display: grid;
-        grid-template-columns: minmax(0, 1fr) auto auto;
-        gap: 5px;
-        align-items: center;
-        width: 100%;
-        border: 1px solid transparent;
-        border-radius: 5px;
-        background: transparent;
-        cursor: pointer;
-        color: #475569;
-        font-family: inherit;
-        font-size: 10px;
-        padding: 3px 4px;
-        text-align: left;
-      }
-
-      .edit-pad-well-row > span {
-        color: #0f172a;
-        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-        font-size: 11px;
-      }
-
-      .edit-pad-well-row:hover {
-        border-color: rgba(37,99,235,0.20);
-        background: rgba(37,99,235,0.07);
-      }
-
-      .edit-pad-well-row strong {
-        font-weight: 600;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
       }
 
       #edit-toolbox.is-pad-selection #edit-points-controls,
@@ -9356,10 +9707,6 @@ class FastReplan {
           <div class="edit-inspector-section-label">Куст</div>
           <div id="edit-pad-summary-title" class="edit-inspector-title"></div>
           <div id="edit-pad-summary-mode" class="edit-inspector-subtitle"></div>
-          <div class="edit-pad-summary-row"><span>ΔX / ΔY</span><strong><span id="edit-pad-delta-x">0,0 м</span> / <span id="edit-pad-delta-y">0,0 м</span></strong></div>
-          <div class="edit-pad-summary-row"><span>Anchor X / Y</span><strong><span id="edit-pad-final-x">0,0 м</span> / <span id="edit-pad-final-y">0,0 м</span></strong></div>
-          <div class="edit-pad-summary-row"><span>НДС</span><strong id="edit-pad-final-nds">0,0°</strong></div>
-          <div id="edit-pad-well-list" class="edit-pad-wells"></div>
         </div>
 
       </div>
@@ -14800,12 +15147,6 @@ class FastReplan {
         const editPadSummary = document.getElementById("edit-pad-summary");
         const editPadSummaryTitle = document.getElementById("edit-pad-summary-title");
         const editPadSummaryMode = document.getElementById("edit-pad-summary-mode");
-        const editPadDeltaX = document.getElementById("edit-pad-delta-x");
-        const editPadDeltaY = document.getElementById("edit-pad-delta-y");
-        const editPadFinalX = document.getElementById("edit-pad-final-x");
-        const editPadFinalY = document.getElementById("edit-pad-final-y");
-        const editPadFinalNds = document.getElementById("edit-pad-final-nds");
-        const editPadWellList = document.getElementById("edit-pad-well-list");
         const editWarningToast = document.getElementById("edit-warning-toast");
         const editWarningHideBtn = document.getElementById("edit-warning-hide-btn");
         const hasEditUiElements = Boolean(
@@ -14839,7 +15180,7 @@ class FastReplan {
         let editMoveScope = "point"; // point | well | after; multi-selection follows the legend selection
         let editTransformMode = "move"; // "move" | "rotate"
         const editHandles = []; // {mesh, pickMesh, previewMesh, originalMesh, wellIndex, pointType, pointIndex, dataPos[3], guide}
-        const editPadMarkers = []; // {mesh, pickMesh, originalMesh, selectionMesh, ndsArrow, rotationControl, label, padIndex, wellIndex, padLabel, pointLabel, dataPos[3], visualPos[3], ndsAzimuthDeg, spacingM, color}
+        const editPadMarkers = []; // {mesh, pickMesh, originalMesh, selectionMesh, ndsArrow, rotationControl, guide, label, padIndex, wellIndex, padLabel, pointLabel, dataPos[3], visualPos[3], ndsAzimuthDeg, spacingM, color}
         const editReplanners = []; // FastReplan per well
         const editLineObjects = []; // THREE.LineSegments per well for preview
         const editLateralLabels = []; // midpoint label per well for current t1-t3 length
@@ -14900,10 +15241,21 @@ class FastReplan {
         let editPadRotateStartPoints = null;
         let editHasAnyChange = false;
         let editWarningDismissed = false;
+        let editCancelConfirmationPending = false;
         let selectedEditHandleIndex = null;
-        let editPadSummaryListKey = "";
         let editBroadcastChannel = null;
         let editSavePendingTimeoutId = null;
+        let pendingEditOperation = null;
+        let editSaveCanRetry = false;
+        let currentDatasetRevision = "";
+        let deferredDatasetUpdate = null;
+        const editDatasetNotice = document.createElement("div");
+        editDatasetNotice.id = "edit-dataset-notice";
+        editDatasetNotice.className = "edit-inspector-subtitle";
+        editDatasetNotice.setAttribute("role", "status");
+        editDatasetNotice.hidden = true;
+        editDatasetNotice.textContent = "Исходные данные обновлены. Старые правки сохранены в сцене. Нажмите «Отмена», чтобы перейти к новым данным.";
+        if (editToolbox) editToolbox.appendChild(editDatasetNotice);
         const EDIT_SAVE_DEFAULT_TEXT = "Сохранить изменения";
         const EDIT_SAVE_ACK_TIMEOUT_MS = 12000;
         const EDIT_DELTA_EPS_M = 0.005;
@@ -15825,12 +16177,10 @@ class FastReplan {
             return "Куст";
           }
           const padLabel = String(marker.padLabel || "").trim();
-          const roleLabel =
-            String(marker.pointLabel || "") === "Центр" ? "Центр" : "S";
           if (!padLabel) {
-            return `Куст · ${roleLabel}`;
+            return "Куст";
           }
-          return `Куст ${padLabel} · ${roleLabel}`;
+          return `Куст ${padLabel}`;
         }
 
         function syncEditPadHandleLabel(marker) {
@@ -15846,30 +16196,14 @@ class FastReplan {
           if (!selected) {
             return;
           }
-          const current = copyEditPoint(marker.dataPos || [0, 0, 0]);
-          const original = copyEditPoint(
-            editPadOriginalAnchors[marker.padIndex] || current,
-          );
-          const dx = Number(current[0]) - Number(original[0]);
-          const dy = Number(current[1]) - Number(original[1]);
-          const total = Math.hypot(dx, dy);
           const currentNds = normalizeAzimuthDeg(
             editPadCurrentNds[marker.padIndex] ?? marker.ndsAzimuthDeg,
           );
-          const originalNds = normalizeAzimuthDeg(
-            editPadOriginalNds[marker.padIndex] ?? currentNds,
-          );
-          const deltaNds = signedAzimuthDeltaDeg(currentNds, originalNds);
           marker.label.element.innerHTML =
             `<span class="edit-delta-head">${escapeHtml(editPadHandleLabelText(marker))}</span>` +
-            `<span class="edit-delta-row"><span>ΔX</span><span>${formatDeltaMeters(dx)}</span></span>` +
-            `<span class="edit-delta-row"><span>ΔY</span><span>${formatDeltaMeters(dy)}</span></span>` +
-            `<span class="edit-delta-row"><span>X</span><span>${formatCoordinateMeters(current[0])}</span></span>` +
-            `<span class="edit-delta-row"><span>Y</span><span>${formatCoordinateMeters(current[1])}</span></span>` +
-            `<span class="edit-delta-row"><span>НДС</span><span>${formatAzimuthDegrees(currentNds)}</span></span>` +
-            `<span class="edit-delta-row"><span>НДС₀</span><span>${formatAzimuthDegrees(originalNds)}</span></span>` +
-            `<span class="edit-delta-row"><span>ΔНДС</span><span>${formatDeltaDegrees(deltaNds)}</span></span>` +
-            `<span class="edit-delta-row edit-delta-total"><span>Итого</span><span>${formatDeltaMeters(total, false)}</span></span>`;
+            (editTransformMode === "rotate"
+              ? `<span class="edit-delta-row"><span>НДС</span><span>${formatAzimuthDegrees(currentNds)}</span></span>`
+              : "");
         }
 
         function updateEditPadMarkerPosition(marker, point) {
@@ -15942,72 +16276,21 @@ class FastReplan {
         }
 
         function syncEditPadSummary() {
-          if (
-            !editPadSummary ||
-            !editPadSummaryTitle ||
-            !editPadSummaryMode ||
-            !editPadDeltaX ||
-            !editPadDeltaY ||
-            !editPadFinalX ||
-            !editPadFinalY
-          ) {
+          if (!editPadSummary || !editPadSummaryTitle || !editPadSummaryMode) {
             return;
           }
           const padIndex = selectedEditPadIndex;
           const pad = selectedEditPad();
           if (!editModeActive || !pad || !isValidEditPadIndex(padIndex)) {
             editPadSummary.classList.remove("is-visible");
-            editPadSummaryListKey = "";
             return;
           }
-          const currentAnchor = editPadCurrentAnchors[padIndex] || [0, 0, 0];
-          const originalAnchor = editPadOriginalAnchors[padIndex] || [0, 0, 0];
           editPadSummaryTitle.textContent = String(
             pad.title || pad.label || pad.id || "Куст",
           );
-          editPadSummaryMode.textContent = String(pad.anchor_mode_label || "");
-          editPadDeltaX.textContent = formatDeltaMeters(
-            Number(currentAnchor[0]) - Number(originalAnchor[0]),
+          editPadSummaryMode.textContent = String(
+            pad.anchor_mode_label || "Положение площадки",
           );
-          editPadDeltaY.textContent = formatDeltaMeters(
-            Number(currentAnchor[1]) - Number(originalAnchor[1]),
-          );
-          editPadFinalX.textContent = formatCoordinateMeters(currentAnchor[0]);
-          editPadFinalY.textContent = formatCoordinateMeters(currentAnchor[1]);
-          if (editPadFinalNds) {
-            editPadFinalNds.textContent = formatAzimuthDegrees(editPadCurrentNds[padIndex]);
-          }
-          if (editPadWellList) {
-            const assignments = Array.isArray(pad.surface_points) ? pad.surface_points : [];
-            const currentPoints = editPadCurrentPoints[padIndex] || [];
-            const listKey = `${padIndex}|${currentPoints.map((point) => point.map((value) => Number(value).toFixed(3)).join(",")).join(";")}|${assignments.length}`;
-            if (listKey !== editPadSummaryListKey) {
-              editPadWellList.replaceChildren();
-              assignments.forEach((assignment, index) => {
-                const originalPoint = copyEditPoint(assignment.position);
-                const currentPoint = copyEditPoint(currentPoints[index] || originalPoint);
-                const row = document.createElement("button");
-                row.type = "button";
-                row.className = "edit-pad-well-row";
-                row.title = "Выбрать устье для отдельного редактирования";
-                const name = document.createElement("strong");
-                name.textContent = `#${Number(assignment.slot_index) || index + 1} ${String(assignment.well_name || "Скважина")}`;
-                const dx = document.createElement("span");
-                dx.textContent = formatDeltaMeters(currentPoint[0] - originalPoint[0]);
-                const dy = document.createElement("span");
-                dy.textContent = formatDeltaMeters(currentPoint[1] - originalPoint[1]);
-                row.append(name, dx, dy);
-                const wellIndex = editWellIndexByName.get(String(assignment.well_name || ""));
-                if (isValidEditWellIndex(wellIndex)) {
-                  row.addEventListener("click", () => selectEditWell(wellIndex, { focus: true }));
-                } else {
-                  row.disabled = true;
-                }
-                editPadWellList.appendChild(row);
-              });
-              editPadSummaryListKey = listKey;
-            }
-          }
           editPadSummary.classList.add("is-visible");
         }
 
@@ -16194,16 +16477,13 @@ class FastReplan {
         }
 
         function editPadNdsArrowLength(marker) {
-          const spacingM = Math.max(Number((marker && marker.spacingM) || 0), 1.0);
-          const wellCount = Math.max(
-            (editPadCurrentPoints[(marker && marker.padIndex) || -1] || []).length,
-            1,
-          );
-          return clampValue(spacingM * Math.max(wellCount * 1.35, 3.2), 48.0, 240.0);
+          // Screen-sized, like the target handle; independent of pad spacing,
+          // number of wells, zoom and the project's coordinate extent.
+          return worldUnitsPerPixelAt(marker.mesh.position) * 28.0;
         }
 
         function editPadRotationRadius(marker) {
-          return Math.max(editPadNdsArrowLength(marker) * 0.72, 36.0);
+          return worldUnitsPerPixelAt(marker.mesh.position) * 34.0;
         }
 
         function createEditPadNdsArrow(padIndex) {
@@ -16314,8 +16594,8 @@ class FastReplan {
           const arrowLength = editPadNdsArrowLength(marker);
           const centerDisplay = displayPoint(anchor);
           if (marker.ndsArrow && marker.ndsArrow.group) {
-            marker.ndsArrow.group.visible = selected;
-            if (selected) {
+            marker.ndsArrow.group.visible = selected && editTransformMode === "rotate";
+            if (selected && editTransformMode === "rotate") {
               const directionData = editPadNdsDirectionData(ndsDeg);
               const tipData = [
                 Number(anchor[0]) + directionData[0] * arrowLength,
@@ -16333,13 +16613,13 @@ class FastReplan {
                 direction,
               );
               const dragging = editPadRotateIndex === marker.padIndex;
+              // Only opacity uniforms change; keep material versions stable
+              // because this also runs while the camera updates handle sizes.
               if (marker.ndsArrow.shaft && marker.ndsArrow.shaft.material) {
                 marker.ndsArrow.shaft.material.opacity = dragging || rotateMode ? 1.0 : 0.82;
-                marker.ndsArrow.shaft.material.needsUpdate = true;
               }
               if (marker.ndsArrow.head && marker.ndsArrow.head.material) {
                 marker.ndsArrow.head.material.opacity = dragging || rotateMode ? 1.0 : 0.82;
-                marker.ndsArrow.head.material.needsUpdate = true;
               }
             }
           }
@@ -16352,7 +16632,6 @@ class FastReplan {
               const dragging = editPadRotateIndex === marker.padIndex;
               if (marker.rotationControl.ring && marker.rotationControl.ring.material) {
                 marker.rotationControl.ring.material.opacity = dragging ? 0.82 : 0.48;
-                marker.rotationControl.ring.material.needsUpdate = true;
               }
             }
           }
@@ -16431,8 +16710,8 @@ class FastReplan {
           element.addEventListener("pointercancel", endDrag);
         }
 
-        function createEditDeltaGuide(pointType, color) {
-          const label = addSceneLabel(
+        function createEditDeltaGuide(pointType, color, existingLabel = null) {
+          const label = existingLabel || addSceneLabel(
             "",
             new THREE.Vector3(0, 0, 0),
             color,
@@ -16440,7 +16719,7 @@ class FastReplan {
             { offsetX: 14, offsetY: 18, role: "edit_delta_label" },
           );
           label.visible = false;
-          initEditDeltaLabelDrag(label);
+          if (!existingLabel) initEditDeltaLabelDrag(label);
           return {
             pointType: pointType,
             lines: {
@@ -16571,8 +16850,59 @@ class FastReplan {
           }
         }
 
+        function updateEditPadDeltaGuide(marker) {
+          if (!marker) {
+            return;
+          }
+          const padIndex = marker.padIndex;
+          const original = editPadOriginalAnchors[padIndex];
+          const current = editPadCurrentAnchors[padIndex] || marker.dataPos;
+          if (!Array.isArray(original) || !Array.isArray(current)) {
+            hideEditDeltaGuide(marker.guide);
+            return;
+          }
+          const dx = Number(current[0]) - Number(original[0]);
+          const dy = Number(current[1]) - Number(original[1]);
+          const dz = Number(current[2]) - Number(original[2]);
+          const total = Math.hypot(dx, dy, dz);
+          const selected =
+            editModeActive &&
+            Number.isInteger(selectedEditPadIndex) &&
+            selectedEditPadIndex === padIndex &&
+            total > EDIT_DELTA_EPS_M;
+          if (!selected) {
+            hideEditDeltaGuide(marker.guide);
+            syncEditPadHandleLabel(marker);
+            return;
+          }
+          if (!marker.guide) {
+            marker.guide = createEditDeltaGuide(
+              editPadHandleLabelText(marker), EDIT_PAD_HANDLE_ACCENT, marker.label,
+            );
+          }
+          const guide = marker.guide;
+          const viaX = [current[0], original[1], original[2]];
+          const viaY = [current[0], current[1], original[2]];
+          updateDashedLineSegments(guide.lines.x, [[original, viaX]], Math.abs(dx) > EDIT_DELTA_EPS_M);
+          updateDashedLineSegments(guide.lines.y, [[viaX, viaY]], Math.abs(dy) > EDIT_DELTA_EPS_M);
+          updateDashedLineSegments(guide.lines.z, [[viaY, current]], Math.abs(dz) > EDIT_DELTA_EPS_M);
+          updateDashedLineSegments(guide.lines.total, [[original, current]], true);
+          guide.label.visible = true;
+          guide.label.position.copy(displayPoint(current));
+          guide.label.element.innerHTML =
+            `<span class="edit-delta-head">${escapeHtml(editPadHandleLabelText(marker))}</span>` +
+            `<span class="edit-delta-row"><span>ΔX</span><span>${formatDeltaMeters(dx)}</span></span>` +
+            `<span class="edit-delta-row"><span>ΔY</span><span>${formatDeltaMeters(dy)}</span></span>` +
+            `<span class="edit-delta-row"><span>ΔZ</span><span>${formatDeltaMeters(dz)}</span></span>` +
+            (editTransformMode === "rotate"
+              ? `<span class="edit-delta-row"><span>НДС</span><span>${formatAzimuthDegrees(editPadCurrentNds[padIndex])}</span></span>`
+              : "") +
+            `<span class="edit-delta-row edit-delta-total"><span>Итого</span><span>${formatDeltaMeters(total, false)}</span></span>`;
+        }
+
         function syncEditDeltaGuides() {
           editHandles.forEach(updateEditDeltaGuide);
+          editPadMarkers.forEach(updateEditPadDeltaGuide);
         }
 
         function horizontalT1T3Length(wellIndex) {
@@ -17110,6 +17440,7 @@ class FastReplan {
         }
 
         function applySidetrackFromInspector() {
+          if (isEditSavePending()) return;
           const handle = selectedEditHandle();
           const wellIndex = selectedEditWellIndex;
           const entry = editPointEntryForHandle(handle);
@@ -17187,7 +17518,7 @@ class FastReplan {
                 ? !Boolean(editPadDirtyFlags[selectedPad])
                 : !Boolean(editDirtyFlags[selectedIndex])
             );
-          editCancelBtn.disabled = !editModeActive || !editHasAnyChange;
+          editCancelBtn.disabled = !editModeActive;
           editPlaneSelector.querySelectorAll(".plane-btn").forEach((btn) => {
             btn.disabled =
               !editModeActive ||
@@ -17217,9 +17548,24 @@ class FastReplan {
           });
           syncEditPadSummary();
           syncEditInspector();
+          const pending = isEditSavePending();
+          editTargetsBtn.disabled = pending || Boolean(deferredDatasetUpdate);
+          if (editSidetrackMd) editSidetrackMd.disabled = pending;
+          if (editApplySidetrack) editApplySidetrack.disabled = pending;
+          if (pending) {
+            editToolbox.querySelectorAll("button").forEach((button) => {
+              button.disabled = true;
+            });
+          }
+          editDatasetNotice.hidden = !deferredDatasetUpdate;
+          if (deferredDatasetUpdate) {
+            editSaveBtn.disabled = true;
+            editSaveBtn.textContent = "Данные обновлены";
+          }
         }
 
         function undoSelectedEdit() {
+          if (isEditSavePending()) return;
           if (Number.isInteger(selectedEditPadIndex)) {
             const padIndex = selectedEditPadIndex;
             if (!Array.isArray(editPadUndoStacks[padIndex]) || editPadUndoStacks[padIndex].length === 0) {
@@ -17265,6 +17611,7 @@ class FastReplan {
         }
 
         function redoSelectedEdit() {
+          if (isEditSavePending()) return;
           if (Number.isInteger(selectedEditPadIndex)) {
             const padIndex = selectedEditPadIndex;
             if (!Array.isArray(editPadRedoStacks[padIndex]) || editPadRedoStacks[padIndex].length === 0) {
@@ -17310,6 +17657,7 @@ class FastReplan {
         }
 
         function resetSelectedEdit() {
+          if (isEditSavePending()) return;
           if (Number.isInteger(selectedEditPadIndex)) {
             const padIndex = selectedEditPadIndex;
             if (!editPadDirtyFlags[padIndex]) {
@@ -17354,34 +17702,53 @@ class FastReplan {
           }
         }
 
+        function resetEditCancelConfirmation() {
+          editCancelConfirmationPending = false;
+          editCancelBtn.textContent = "Отмена";
+          editCancelBtn.title = "Отменить все несохранённые изменения";
+          editCancelBtn.removeAttribute("aria-label");
+        }
+
         function cancelEditChanges() {
+          if (isEditSavePending()) return;
           if (!editModeActive) {
             return;
           }
-          if (
-            editHasAnyChange &&
-            !window.confirm("Отменить все несохранённые изменения?")
-          ) {
+          // Native confirm dialogs are blocked by the component iframe's
+          // sandbox. Confirm in-place without an additional modal or panel.
+          if (editHasAnyChange && !editCancelConfirmationPending) {
+            editCancelConfirmationPending = true;
+            editCancelBtn.textContent = "Точно?";
+            editCancelBtn.title = "Отменить все несохранённые изменения?";
+            editCancelBtn.setAttribute("aria-label", "Подтвердить отмену всех несохранённых изменений");
+            return;
+          }
+          resetEditCancelConfirmation();
+          if (deferredDatasetUpdate) {
+            const update = deferredDatasetUpdate;
+            const nextPayload = JSON.parse(update.payloadJson);
+            deferredDatasetUpdate = null;
+            currentDatasetRevision = update.context.datasetRevision;
+            applyViewerPayload(nextPayload, { preserveView: true });
+            payloadDigest = update.digest;
+            setEditMode(false);
+            update.context.onAccepted();
             return;
           }
           editDirtyFlags.forEach((isDirty, wellIndex) => {
-            if (!isDirty) {
-              return;
-            }
-            applyEditState(wellIndex, originalEditState(wellIndex));
+            if (isDirty) applyEditState(wellIndex, originalEditState(wellIndex));
             editUndoStacks[wellIndex] = [];
             editRedoStacks[wellIndex] = [];
           });
           editPadDirtyFlags.forEach((isDirty, padIndex) => {
-            if (!isDirty) {
-              return;
+            if (isDirty) {
+              applyEditPadState(
+                padIndex,
+                editPadOriginalAnchors[padIndex],
+                originalEditPadSurfacePoints(padIndex),
+                editPadOriginalNds[padIndex],
+              );
             }
-            applyEditPadState(
-              padIndex,
-              editPadOriginalAnchors[padIndex],
-              originalEditPadSurfacePoints(padIndex),
-              editPadOriginalNds[padIndex],
-            );
             editPadUndoStacks[padIndex] = [];
             editPadRedoStacks[padIndex] = [];
           });
@@ -17533,8 +17900,16 @@ class FastReplan {
         }
 
         function initEditPads() {
-          const markerGeometry = new THREE.SphereGeometry(1.0, 16, 12);
-          const selectionGeometry = new THREE.SphereGeometry(1.0, 12, 10);
+          // A small hexagonal puck reads as a pad/cluster while staying in the
+          // same visual scale as an editable well target.  The old NDS arrow
+          // was both oversized and ambiguous in move mode.
+          const markerGeometry = new THREE.CylinderGeometry(0.9, 0.9, 0.42, 6);
+          markerGeometry.rotateX(Math.PI * 0.5);
+          const selectionGeometry = new THREE.RingGeometry(0.90, 1.0, 6);
+          const dotGeometry = new THREE.CircleGeometry(0.16, 12);
+          const dotMaterial = new THREE.MeshBasicMaterial({
+            color: "#ffffff", transparent: true, depthTest: false, depthWrite: false,
+          });
           const pickGeometry = new THREE.SphereGeometry(1.0, 12, 10);
           const pickMaterial = new THREE.MeshBasicMaterial({
             color: "#ffffff",
@@ -17592,13 +17967,20 @@ class FastReplan {
             mesh.userData.lockViewerZGeometryScale = true;
             mesh.visible = false;
             mesh.renderOrder = 13;
+            // Three wellheads distinguish the pad from a single target point.
+            [[-0.30, -0.18], [0.30, -0.18], [0, 0.34]].forEach(([x, y]) => {
+              const dot = new THREE.Mesh(dotGeometry, dotMaterial);
+              dot.position.set(x, y, 0.24);
+              dot.renderOrder = 14;
+              mesh.add(dot);
+            });
             scene.add(mesh);
             const originalMesh = new THREE.Mesh(
-              markerGeometry,
+              selectionGeometry,
               new THREE.MeshBasicMaterial({
-                color: "#ffffff",
+                color: "#64748b",
                 transparent: true,
-                opacity: 0.88,
+                opacity: 0.82,
                 depthTest: false,
                 depthWrite: false,
               }),
@@ -17612,7 +17994,6 @@ class FastReplan {
               selectionGeometry,
               new THREE.MeshBasicMaterial({
                 color: "#ffffff",
-                wireframe: true,
                 transparent: true,
                 opacity: 0.98,
                 depthTest: false,
@@ -17652,6 +18033,7 @@ class FastReplan {
               selectionMesh: selectionMesh,
               ndsArrow: ndsArrow,
               rotationControl: rotationControl,
+              guide: null,
               label: label,
               padIndex: padIndex,
               pointIndex: null,
@@ -17746,8 +18128,11 @@ class FastReplan {
               ? marker.mesh.position
               : displayPoint(marker.dataPos);
             if (marker.mesh) {
+              // Face the camera so the small pad glyph never becomes an
+              // unreadable edge-on sliver when orbiting near the XY plane.
+              marker.mesh.quaternion.copy(camera.quaternion);
               marker.mesh.scale.setScalar(
-                editHandleScale(displayPosition, selectedPad ? 16.0 : 12.0),
+                editHandleScale(displayPosition, selectedPad ? 20.0 : 14.0),
               );
             }
             if (marker.pickMesh) {
@@ -17756,19 +18141,32 @@ class FastReplan {
               );
             }
             if (marker.originalMesh) {
+              marker.originalMesh.quaternion.copy(camera.quaternion);
               marker.originalMesh.scale.setScalar(
-                editHandleScale(marker.originalMesh.position, 11.0),
+                editHandleScale(marker.originalMesh.position, 18.0),
               );
             }
             if (marker.selectionMesh) {
+              marker.selectionMesh.quaternion.copy(camera.quaternion);
               marker.selectionMesh.scale.setScalar(
-                editHandleScale(displayPosition, selectedPad ? 22.0 : 14.0),
+                editHandleScale(displayPosition, selectedPad ? 22.0 : 16.0),
               );
             }
+            if (selectedPad) updateEditPadNdsVisuals(marker);
           });
         }
 
+        function isEditSavePending() {
+          return pendingEditOperation !== null;
+        }
+
         function resetEditSaveButtonState() {
+          if (isEditSavePending()) return;
+          if (deferredDatasetUpdate) {
+            editSaveBtn.disabled = true;
+            editSaveBtn.textContent = "Данные обновлены";
+            return;
+          }
           if (!editSaveBtn) {
             return;
           }
@@ -17794,6 +18192,7 @@ class FastReplan {
           editSaveBtn.classList.remove("is-pending");
           editSaveBtn.classList.add("is-error");
           editSaveBtn.textContent = String(message || "Не удалось применить");
+          syncEditToolboxState();
         }
 
         function initEditToolboxDrag() {
@@ -17850,6 +18249,7 @@ class FastReplan {
         }
 
         function syncEditVisibility() {
+          resetEditCancelConfirmation();
           syncSelectedEditHandle();
           const selectedPadIndex = isValidEditPadIndex(selectedEditPadIndex)
             ? selectedEditPadIndex
@@ -17982,6 +18382,8 @@ class FastReplan {
         }
 
         function setEditMode(active) {
+          if (isEditSavePending()) return;
+          if (deferredDatasetUpdate) return;
           editModeActive = active;
           editTargetsBtn.classList.toggle("is-active", active);
           editToolbox.classList.toggle("is-visible", active);
@@ -18010,6 +18412,7 @@ class FastReplan {
         }
 
         function setEditPlane(plane) {
+          if (isEditSavePending()) return;
           if (plane !== "xy" && plane !== "z") {
             return;
           }
@@ -18021,6 +18424,7 @@ class FastReplan {
         }
 
         function setEditMoveScope(scope) {
+          if (isEditSavePending()) return;
           const validScopes = new Set(["point", "well", "after"]);
           if (!validScopes.has(String(scope || ""))) {
             return;
@@ -18036,6 +18440,7 @@ class FastReplan {
         }
 
         function setEditTransformMode(operation) {
+          if (isEditSavePending()) return;
           if (operation !== "move" && operation !== "rotate") {
             return;
           }
@@ -18059,8 +18464,7 @@ class FastReplan {
           editOperationSelector.querySelectorAll(".operation-btn").forEach((btn) => {
             btn.classList.toggle("is-active", btn.dataset.operation === operation);
           });
-          syncEditRotationControls();
-          syncEditToolboxState();
+          syncEditVisibility();
           requestRender();
         }
 
@@ -18380,6 +18784,7 @@ class FastReplan {
         }
 
         function onEditKeyDown(event) {
+          if (isEditSavePending()) return;
           if (Number.isInteger(selectedEditPadIndex)) {
             return;
           }
@@ -18886,6 +19291,7 @@ class FastReplan {
         }
 
         function startMiniMapEditDrag(event) {
+          if (isEditSavePending()) return false;
           const handle = miniMapEditableHandleAtEvent(event);
           if (!handle) {
             return false;
@@ -18923,6 +19329,7 @@ class FastReplan {
         }
 
         function onEditPointerDown(event) {
+          if (isEditSavePending()) return;
           if (!editModeActive) return;
           if (isPointerInMiniMap(event)) return;
           const rect = renderer.domElement.getBoundingClientRect();
@@ -19323,7 +19730,7 @@ class FastReplan {
           requestRender();
         }
 
-        function sendEditTargetsToStreamlit(changes, padChanges) {
+        function sendEditTargetsToStreamlit(operation) {
           if (!editChannelName || typeof BroadcastChannel === "undefined") {
             return false;
           }
@@ -19331,12 +19738,7 @@ class FastReplan {
             if (!editBroadcastChannel) {
               editBroadcastChannel = new BroadcastChannel(editChannelName);
             }
-            editBroadcastChannel.postMessage({
-              type: "pywp:editTargets",
-              changes: Array.isArray(changes) ? changes : [],
-              pad_changes: Array.isArray(padChanges) ? padChanges : [],
-              nonce: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-            });
+            editBroadcastChannel.postMessage(operation);
             return true;
           } catch (e) {
             return false;
@@ -19344,6 +19746,11 @@ class FastReplan {
         }
 
         function onEditSave() {
+          if (deferredDatasetUpdate) return;
+          if (isEditSavePending()) {
+            if (editSaveCanRetry) transmitPendingEditOperation();
+            return;
+          }
           // Collect changes
           const changes = [];
           const padChanges = [];
@@ -19451,14 +19858,39 @@ class FastReplan {
             });
           });
           if (changes.length === 0 && padChanges.length === 0) return;
-          // Visual feedback
+          pendingEditOperation = {
+            type: "pywp:editTargets",
+            changes: changes,
+            pad_changes: padChanges,
+            nonce: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+            delivery_attempt: 0,
+            dataset_revision: currentDatasetRevision,
+          };
+          transmitPendingEditOperation();
+        }
+
+        function transmitPendingEditOperation() {
+          if (!pendingEditOperation) return;
+          const previouslySent = pendingEditOperation.delivery_attempt > 0;
+          // A transport retry changes the component value, but not the operation
+          // identity or its immutable submitted coordinates.
+          pendingEditOperation.delivery_attempt += 1;
+          editSaveCanRetry = false;
           editSaveBtn.disabled = true;
           editSaveBtn.textContent = "Применяем...";
+          editSaveBtn.classList.remove("is-error");
           editSaveBtn.classList.add("is-pending");
-          if (!sendEditTargetsToStreamlit(changes, padChanges)) {
+          resetEditCancelConfirmation();
+          syncEditToolboxState();
+          if (!sendEditTargetsToStreamlit(pendingEditOperation)) {
+            if (!previouslySent) pendingEditOperation = null;
+            editSaveCanRetry = previouslySent;
             showEditSaveError("Не удалось применить");
           } else {
             editSavePendingTimeoutId = setTimeout(() => {
+              // Timeout is an unknown outcome, not rejection. Keep editing
+              // locked until this operation is explicitly acknowledged.
+              editSaveCanRetry = true;
               showEditSaveError("Нет подтверждения — повторить");
             }, EDIT_SAVE_ACK_TIMEOUT_MS);
           }
@@ -19599,10 +20031,9 @@ class FastReplan {
           selectedEditWellIndices = new Set();
           editLegendSelectionAnchorIndex = null;
 
-          const rawPadIndex = context.selectedPadId
+          const padIndex = context.selectedPadId
             ? editPadIndexById.get(String(context.selectedPadId))
             : null;
-          const padIndex = Number(rawPadIndex);
           if (isValidEditPadIndex(padIndex)) {
             selectedEditPadIndex = padIndex;
             selectedEditHandleIndex = null;
@@ -19660,10 +20091,10 @@ class FastReplan {
           syncSelectedEditHandle();
           if (
             context.transformMode === "rotate" &&
-            selectedEditPadIndex === null &&
-            Number.isInteger(selectedEditWellIndex) &&
-            selectedEditWellIndices.size <= 1 &&
-            editWellSupportsRotation(selectedEditWellIndex)
+            (isValidEditPadIndex(selectedEditPadIndex) ||
+              (Number.isInteger(selectedEditWellIndex) &&
+                selectedEditWellIndices.size <= 1 &&
+                editWellSupportsRotation(selectedEditWellIndex)))
           ) {
             editTransformMode = "rotate";
           }
@@ -19779,7 +20210,10 @@ class FastReplan {
           editPadOriginalNds.length = 0;
           editPadCurrentNds.length = 0;
           editPadDirtyFlags.length = 0;
-          editPadSummaryListKey = "";
+          editPadUndoStacks.length = 0;
+          editPadRedoStacks.length = 0;
+          editPadDragHistoryStartState = null;
+          editPadRotateHistoryStartState = null;
           editOriginalPoints.length = 0;
           editCurrentPoints.length = 0;
           editOriginalT1.length = 0;
@@ -20006,6 +20440,10 @@ class FastReplan {
           editRedoBtn.addEventListener("click", redoSelectedEdit);
           editResetBtn.addEventListener("click", resetSelectedEdit);
           editCancelBtn.addEventListener("click", cancelEditChanges);
+          editCancelBtn.addEventListener("blur", resetEditCancelConfirmation);
+          editCancelBtn.addEventListener("keydown", (event) => {
+            if (event.key === "Escape") resetEditCancelConfirmation();
+          });
           editSaveBtn.addEventListener("click", onEditSave);
           if (editApplySidetrack) {
             editApplySidetrack.addEventListener("click", applySidetrackFromInspector);
@@ -20028,20 +20466,60 @@ class FastReplan {
         syncLegendVisibility();
         renderCollisions();
         startAnimationLoop();
-        window.__PYWP_VIEWER_UPDATE__ = function (nextPayloadJson, nextPayloadDigest) {
+        window.__PYWP_VIEWER_SET_DATASET_REVISION__ = function (revision) {
+          currentDatasetRevision = String(revision || "");
+        };
+        window.__PYWP_VIEWER_UPDATE__ = function (nextPayloadJson, nextPayloadDigest, editAck, context = {}) {
+          const nextRevision = String(context.datasetRevision || "");
+          const datasetChanged = nextRevision !== currentDatasetRevision;
+          const matchingAck = isEditSavePending() && editAck &&
+            editAck.nonce === pendingEditOperation.nonce &&
+            ["applied", "noop", "error", "conflict"].includes(editAck.status);
+          if ((datasetChanged || (matchingAck && editAck.status === "conflict")) &&
+              (editHasAnyChange || isEditSavePending() || deferredDatasetUpdate)) {
+            deferredDatasetUpdate = {
+              payloadJson: String(nextPayloadJson || "{}"),
+              digest: String(nextPayloadDigest || ""),
+              context: { datasetRevision: nextRevision, onAccepted: context.onAccepted || (() => {}) },
+            };
+            pendingEditOperation = null;
+            editSaveCanRetry = false;
+            showEditSaveError("Данные обновлены");
+            return false;
+          }
+          if (deferredDatasetUpdate) return false;
+          if (isEditSavePending() && !matchingAck) return false;
+          if (matchingAck && editAck.status === "error") {
+            pendingEditOperation = null;
+            editSaveCanRetry = false;
+            showEditSaveError("Изменения не применены — повторить");
+            return false;
+          }
+          // Unrelated host renders and old acknowledgements must not overwrite
+          // a local draft. Overlay-only updates have a separate safe path.
+          if (!matchingAck && editModeActive && editHasAnyChange) return false;
           const resolvedDigest = String(nextPayloadDigest || "");
-          if (resolvedDigest && resolvedDigest === payloadDigest) {
+          if (!datasetChanged && !matchingAck && resolvedDigest && resolvedDigest === payloadDigest) {
             return true;
           }
           const nextPayload = JSON.parse(String(nextPayloadJson || "{}"));
+          pendingEditOperation = null;
+          editSaveCanRetry = false;
+          currentDatasetRevision = nextRevision;
           applyViewerPayload(nextPayload, { preserveView: true });
           payloadDigest = resolvedDigest;
           return true;
         };
         window.__PYWP_VIEWER_APPLY_ANTICOLLISION_OVERLAY__ = function (
           nextPayloadJson,
-          nextPayloadDigest
+          nextPayloadDigest,
+          editAck,
+          context = {}
         ) {
+          if (isEditSavePending() || deferredDatasetUpdate ||
+              String(context.datasetRevision || "") !== currentDatasetRevision) {
+            return window.__PYWP_VIEWER_UPDATE__(nextPayloadJson, nextPayloadDigest, editAck, context);
+          }
           const resolvedDigest = String(nextPayloadDigest || "");
           if (resolvedDigest && resolvedDigest === payloadDigest) {
             return true;

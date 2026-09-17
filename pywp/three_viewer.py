@@ -128,6 +128,8 @@ def render_local_three_scene(
     height: int,
     instance_token: int = 0,
     key: str | None = None,
+    edit_ack: Mapping[str, object] | None = None,
+    dataset_revision: str = "",
 ) -> object:
     stable_key = str(key or payload.get("title") or "scene")
     payload_json, payload_digest, edit_channel = _serialized_payload(
@@ -139,6 +141,8 @@ def render_local_three_scene(
         payload_json=payload_json,
         payload_digest=payload_digest,
         runtime_digest=_viewer_runtime_digest(),
+        edit_ack=dict(edit_ack) if edit_ack else None,
+        dataset_revision=str(dataset_revision),
         has_anticollision_payload=bool(
             payload.get("anti_collision_layer_state")
             or payload.get("collisions")

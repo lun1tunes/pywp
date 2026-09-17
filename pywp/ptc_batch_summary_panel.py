@@ -52,6 +52,9 @@ _EXPORT_KIND_TRAJECTORIES = "Траектории"
 _EXPORT_KIND_TARGETS = "Цели"
 _EXPORT_KINDS = (_EXPORT_KIND_TRAJECTORIES, _EXPORT_KIND_TARGETS)
 _DOWNLOAD_AUTO_BUILD_ROW_LIMIT = 5000
+# Invalidate prepared files when the export schema/semantics change, without
+# discarding the calculated trajectories or forcing a solver rerun.
+_DOWNLOAD_PAYLOAD_VERSION = 2
 _WINDOWS_BLOCKED_DEV_EXPORT_DRIVES = frozenset({"c", "d"})
 _DEV_EXPORT_DIRECTORY_KEY = "wt_dev_export_directory"
 _DEV_EXPORT_PENDING_KEY = "wt_dev_export_pending"
@@ -782,6 +785,7 @@ def _download_signature(
     selected_names: tuple[object, ...] = (),
 ) -> tuple[object, ...]:
     return (
+        _DOWNLOAD_PAYLOAD_VERSION,
         str(export_kind),
         str(export_format),
         _crs_signature(target_crs),

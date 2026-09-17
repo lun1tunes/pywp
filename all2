@@ -1,3 +1,122 @@
+    return float(miss * 1e6 + candidate.md_total_m)
+
+
+def _fixed_turn_search_components(
+    *,
+    bounds: tuple[tuple[float, float], ...],
+    split_build: bool,
+    fixed_kop_vertical_m: float | None,
+) -> dict[int, float]:
+    if fixed_kop_vertical_m is None:
+        return {}
+    kop_index = 2 if split_build else 1
+    if kop_index >= len(bounds):
+        return {}
+    lower, upper = bounds[kop_index]
+    return {
+        kop_index: float(
+            np.clip(float(fixed_kop_vertical_m), float(lower), float(upper))
+        )
+    }
+
+
+def _apply_fixed_search_components_to_vector(
+    *,
+    vector: np.ndarray,
+    bounds: tuple[tuple[float, float], ...],
+    fixed_components: dict[int, float],
+) -> np.ndarray:
+    normalized = _clip_to_bounds(np.asarray(vector, dtype=float), bounds=bounds)
+    for index, value in fixed_components.items():
+        lower, upper = bounds[int(index)]
+        normalized[int(index)] = float(
+            np.clip(float(value), float(lower), float(upper))
+        )
+    return normalized
+
+
+def _turn_least_squares_probes(
+    *,
+    seed_vector: np.ndarray,
+    fixed_components: dict[int, float],
+    bounds: tuple[tuple[float, float], ...],
+    profile_builder: Callable[[np.ndarray], ProfileParameters | None],
+    target_point: np.ndarray,
+    config: TrajectoryConfig,
+    max_nfev: int,
+) -> list[np.ndarray]:
+    seed = _apply_fixed_search_components_to_vector(
+        vector=np.asarray(seed_vector, dtype=float),
+        bounds=bounds,
+        fixed_components=fixed_components,
+    )
+    fixed = {int(index): float(value) for index, value in fixed_components.items()}
+    free_indices = [index for index in range(len(bounds)) if index not in fixed]
+    if not free_indices:
+        return [seed]
+
+    lower = np.array([bounds[index][0] for index in free_indices], dtype=float)
+    upper = np.array([bounds[index][1] for index in free_indices], dtype=float)
+    x0 = np.array([seed[index] for index in free_indices], dtype=float)
+
+    def _compose(free_values: np.ndarray) -> np.ndarray:
+        full = seed.copy()
+        for index, value in fixed.items():
+            full[index] = float(value)
+        for free_index, value in zip(
+            free_indices, np.asarray(free_values, dtype=float)
+        ):
+            full[free_index] = float(value)
+        return _apply_fixed_search_components_to_vector(
+            vector=full,
+            bounds=bounds,
+            fixed_components=fixed,
+        )
+
+    solution = least_squares(
+        fun=lambda free_values: _turn_residuals(
+            values=_compose(np.asarray(free_values, dtype=float)),
+            profile_builder=profile_builder,
+            target_point=target_point,
+            config=config,
+        ),
+        x0=x0,
+        bounds=(lower, upper),
+        method="trf",
+        jac="2-point",
+        x_scale="jac",
+        ftol=1e-10,
+        xtol=1e-10,
+        gtol=1e-10,
+        max_nfev=int(max(max_nfev, 20)),
+    )
+
+    probes = [_compose(x0)]
+    if bool(solution.success) and np.all(np.isfinite(solution.x)):
+        probes.append(_compose(np.asarray(solution.x, dtype=float)))
+    return _dedupe_seed_vectors(probes)
+
+
+def _slsqp_search_probes(
+    *,
+    seed_vector: np.ndarray,
+    fixed_components: dict[int, float],
+    bounds: tuple[tuple[float, float], ...],
+    objective: Callable[[np.ndarray], float],
+    constraint_functions: tuple[Callable[[np.ndarray], float], ...],
+    maxiter: int,
+) -> list[np.ndarray]:
+    seed = _apply_fixed_search_components_to_vector(
+        vector=np.asarray(seed_vector, dtype=float),
+        bounds=bounds,
+        fixed_components=fixed_components,
+    )
+    fixed = {int(index): float(value) for index, value in fixed_components.items()}
+    free_indices = [index for index in range(len(bounds)) if index not in fixed]
+    if not free_indices:
+        return [seed]
+
+    reduced_bounds = [bounds[index] for index in free_indices]
     reduced_seed = np.asarray(
         [float(seed[index]) for index in free_indices], dtype=float
     )
@@ -2821,7 +2940,7 @@ def anticollision_focus_well_names(
     return tuple(sorted(related))
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_batch_results.py	67325
+===BEGIN_FILE===	pywp/ptc_batch_results.py	67376
 from __future__ import annotations
 
 import inspect
@@ -2858,6 +2977,7 @@ from pywp.ui_well_panels import (
     survey_export_csv_bytes,
     survey_export_dataframe,
     survey_export_excel_bytes,
+    survey_source_coordinates,
 )
 from pywp.welltrack_batch import SuccessfulWellPlan
 
@@ -3639,7 +3759,7 @@ def _build_batch_survey_export_frame(
         if source_stations.empty:
             continue
 
-        export_stations = source_stations.copy()
+        export_stations = survey_source_coordinates(source_stations)
         if export_context.should_transform:
             export_stations = transform_stations_func(
                 export_stations,
@@ -4796,7 +4916,7 @@ def find_selected_success(
     return next(item for item in successes if str(item.name) == str(selected_name))
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_batch_run.py	32637
+===BEGIN_FILE===	pywp/ptc_batch_run.py	34314
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
@@ -4818,6 +4938,7 @@ from pywp.pilot_wells import (
     parent_name_for_zbs,
     pilot_name_key_for_parent,
     pilot_name_key_for_record,
+    pilot_parent_key_for_record,
     sync_pilot_surfaces_to_parents,
     visible_well_names,
     well_name_key,
@@ -5190,18 +5311,48 @@ def run_batch_if_clicked(
         state.get("wt_pad_auto_applied_on_import", False)
     )
     if pad_layout_active:
-        base_records = state.get("wt_records_original")
-        if base_records:
-            pads = hooks.ensure_pad_configs(base_records=list(base_records))
-            plan_map = hooks.build_pad_plan_map(pads)
-            records_for_run = sync_pilot_surfaces_to_parents(
-                apply_pad_layout(
-                    records=list(base_records),
-                    pads=pads,
-                    plan_by_pad_id=plan_map,
-                )
-            )
-            state["wt_records"] = list(records_for_run)
+        # Apply already committed geometry to the working records. Rebuilding
+        # from the immutable import snapshot would discard unrelated edits and
+        # would move pilots from other pads during a partial recalculation.
+        selected_keys = {well_name_key(name) for name in selected_set}
+        selected_records = [
+            record for record in records_for_run
+            if well_name_key(record.name) in selected_keys
+        ]
+        parent_keys = {pilot_parent_key_for_record(record) for record in selected_records}
+        layout_parent_keys = {
+            pilot_parent_key_for_record(record) for record in selected_records
+            if not is_pilot_name(record.name) and not is_zbs_record(record)
+        }
+        execution_keys = selected_keys | {
+            pilot_name_key_for_record(record) for record in selected_records
+            if not is_pilot_name(record.name) and not is_zbs_record(record)
+        }
+        # Membership is anchored to the import (moving a pad must not redetect
+        # its ID), but coordinate updates are applied to current working data.
+        pads = hooks.ensure_pad_configs(
+            base_records=list(state.get("wt_records_original") or records_for_run)
+        )
+        pads = [
+            pad for pad in pads
+            if any(pilot_parent_key_for_record(well) in layout_parent_keys
+                   for well in getattr(pad, "wells", ()))
+        ]
+        plan_map = hooks.build_pad_plan_map(pads)
+        laid_out_records = sync_pilot_surfaces_to_parents(
+            apply_pad_layout(
+                records=list(records_for_run), pads=pads, plan_by_pad_id=plan_map
+            ),
+            only_parent_keys=parent_keys,
+        )
+        laid_out_by_name = {well_name_key(record.name): record for record in laid_out_records}
+        # Partial selections within a pad also leave unselected siblings alone.
+        records_for_run = [
+            laid_out_by_name.get(well_name_key(record.name), record)
+            if well_name_key(record.name) in execution_keys else record
+            for record in records_for_run
+        ]
+        state["wt_records"] = list(records_for_run)
 
     batch = WelltrackBatchPlanner(planner=TrajectoryPlanner())
     log_verbosity = str(state.get("wt_log_verbosity", log_compact_label))
@@ -5627,7 +5778,7 @@ def run_batch_if_clicked(
         live_log_placeholder.empty()
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_batch_summary_panel.py	58877
+===BEGIN_FILE===	pywp/ptc_batch_summary_panel.py	59087
 from __future__ import annotations
 
 from collections.abc import Callable, MutableMapping
@@ -5682,6 +5833,9 @@ _EXPORT_KIND_TRAJECTORIES = "Траектории"
 _EXPORT_KIND_TARGETS = "Цели"
 _EXPORT_KINDS = (_EXPORT_KIND_TRAJECTORIES, _EXPORT_KIND_TARGETS)
 _DOWNLOAD_AUTO_BUILD_ROW_LIMIT = 5000
+# Invalidate prepared files when the export schema/semantics change, without
+# discarding the calculated trajectories or forcing a solver rerun.
+_DOWNLOAD_PAYLOAD_VERSION = 2
 _WINDOWS_BLOCKED_DEV_EXPORT_DRIVES = frozenset({"c", "d"})
 _DEV_EXPORT_DIRECTORY_KEY = "wt_dev_export_directory"
 _DEV_EXPORT_PENDING_KEY = "wt_dev_export_pending"
@@ -6412,6 +6566,7 @@ def _download_signature(
     selected_names: tuple[object, ...] = (),
 ) -> tuple[object, ...]:
     return (
+        _DOWNLOAD_PAYLOAD_VERSION,
         str(export_kind),
         str(export_format),
         _crs_signature(target_crs),
@@ -7238,7 +7393,7 @@ def _as_selection_list(value: object) -> list[object]:
     return []
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_core.py	386733
+===BEGIN_FILE===	pywp/ptc_core.py	388704
 from __future__ import annotations
 
 import colorsys
@@ -7251,7 +7406,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime
 from time import perf_counter
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, MutableMapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -8565,18 +8720,22 @@ def _render_three_payload(
         payload=payload,
         payload_overrides=payload_overrides,
     )
+    component_key = str(
+        (payload_overrides or {}).get("component_key")
+        or payload.get("title")
+        or f"three-{height}"
+    )
+    ack_key = f"wt_three_edit_ack:{component_key}"
     with container:
         edit_event = render_local_three_scene(
             payload,
             height=height,
             instance_token=int(st.session_state.get("wt_three_viewer_nonce", 0)),
-            key=str(
-                (payload_overrides or {}).get("component_key")
-                or payload.get("title")
-                or f"three-{height}"
-            ),
+            edit_ack=st.session_state.get(ack_key),
+            dataset_revision=str(st.session_state.get("wt_target_dataset_revision") or ""),
+            key=component_key,
         )
-    if _handle_three_edit_event(edit_event):
+    if _handle_three_edit_event(edit_event, ack_key=ack_key):
         # The results and run sections are rendered inside Streamlit fragments.
         # A local 3D edit must refresh only that fragment; a full app rerun
         # resets unrelated widget/layout state and causes visible scroll/focus
@@ -8943,6 +9102,10 @@ def _update_uncertainty_model_cache_digest(
                 float(model.sample_step_m),
                 float(model.min_refined_step_m),
                 float(model.directional_refine_threshold_deg),
+                float(model.max_display_ellipses),
+                float(model.ellipse_points),
+                float(model.min_display_radius_m),
+                float(model.near_vertical_isotropic_threshold_deg),
                 float(model.iscwsa_environment.gtot_mps2),
                 float(model.iscwsa_environment.mtot_nt),
                 float(model.iscwsa_environment.dip_deg),
@@ -9807,20 +9970,20 @@ def _queue_surface_edit_feedback(
     changed_well_names: Iterable[object],
     *,
     source: str,
+    session_state: MutableMapping[str, object] | None = None,
 ) -> list[str]:
+    state = st.session_state if session_state is None else session_state
     changed_names = _unique_well_names(changed_well_names)
     if not changed_names:
         return []
 
     existing_highlighted_names = _unique_well_names(
         [
-            *(st.session_state.get("wt_edit_targets_pending_names") or []),
-            *(st.session_state.get("wt_edit_targets_highlight_names") or []),
+            *(state.get("wt_edit_targets_pending_names") or []),
+            *(state.get("wt_edit_targets_highlight_names") or []),
         ]
     )
-    existing_highlight_points_raw = st.session_state.get(
-        "wt_edit_targets_highlight_points"
-    )
+    existing_highlight_points_raw = state.get("wt_edit_targets_highlight_points")
     existing_highlight_points: dict[str, list[int]] = {}
     if isinstance(existing_highlight_points_raw, Mapping):
         for raw_name, raw_indices in existing_highlight_points_raw.items():
@@ -9834,21 +9997,19 @@ def _queue_surface_edit_feedback(
     # A pad edit invalidates only the wells whose surface actually moved.
     # Keep the anti-collision snapshot and its per-well/pair caches: the next
     # targeted trajectory run must be able to reuse every untouched pad.
-    current_records = list(st.session_state.get("wt_records") or [])
+    current_records = list(state.get("wt_records") or [])
     if current_records:
         ptc_edit_targets.invalidate_results_for_edited_targets(
-            st.session_state,
+            state,
             records=current_records,
             edited_names=changed_names,
             base_row_factory=WelltrackBatchPlanner._base_row,
         )
-    st.session_state["wt_last_error"] = ""
-    st.session_state["wt_last_run_at"] = ""
-    st.session_state["wt_last_runtime_s"] = None
-    st.session_state["wt_last_run_log_lines"] = []
-    pending_names = _unique_well_names(
-        [*existing_highlighted_names, *changed_names]
-    )
+    state["wt_last_error"] = ""
+    state["wt_last_run_at"] = ""
+    state["wt_last_runtime_s"] = None
+    state["wt_last_run_log_lines"] = []
+    pending_names = _unique_well_names([*existing_highlighted_names, *changed_names])
     for well_name in changed_names:
         row_indices = set(existing_highlight_points.get(well_name, []))
         row_indices.add(0)
@@ -9859,17 +10020,17 @@ def _queue_surface_edit_feedback(
         for well_name in pending_names
         if existing_highlight_points.get(well_name)
     }
-    st.session_state["wt_edit_targets_pending_names"] = list(pending_names)
-    st.session_state["wt_edit_targets_highlight_names"] = [
+    state["wt_edit_targets_pending_names"] = list(pending_names)
+    state["wt_edit_targets_highlight_names"] = [
         well_name for well_name in pending_names if well_name in highlight_points
     ]
-    st.session_state["wt_edit_targets_highlight_points"] = highlight_points
-    st.session_state["wt_edit_targets_applied"] = list(changed_names)
-    st.session_state["wt_edit_targets_applied_source"] = source
-    st.session_state["wt_edit_targets_last_source"] = source
-    st.session_state.pop("wt_edit_targets_applied_note", None)
-    st.session_state["wt_pending_selected_names"] = list(pending_names)
-    _queue_all_wells_results_focus()
+    state["wt_edit_targets_highlight_points"] = highlight_points
+    state["wt_edit_targets_applied"] = list(changed_names)
+    state["wt_edit_targets_applied_source"] = source
+    state["wt_edit_targets_last_source"] = source
+    state.pop("wt_edit_targets_applied_note", None)
+    state["wt_pending_selected_names"] = list(pending_names)
+    ptc_edit_targets.queue_all_wells_results_focus(state)
     return changed_names
 
 
@@ -9918,45 +10079,61 @@ def _apply_edit_pad_changes(
     changes: object,
     *,
     source: str = "3d",
+    session_state: MutableMapping[str, object] | None = None,
 ) -> list[str]:
+    state = st.session_state if session_state is None else session_state
     if not isinstance(changes, list) or not changes:
         return []
     base_records = list(
-        st.session_state.get("wt_records_original")
-        or st.session_state.get("wt_records")
-        or []
+        state.get("wt_records_original") or state.get("wt_records") or []
     )
-    working_records = list(st.session_state.get("wt_records") or base_records)
+    working_records = list(state.get("wt_records") or base_records)
     if not base_records:
+        if source == "three_viewer":
+            raise ValueError("Нет исходных скважин для редактирования куста.")
         return []
-    pads = _ensure_pad_configs(base_records=base_records)
+    pads = ptc_pad_state.ensure_pad_configs(
+        state, base_records=visible_well_records(base_records, include_zbs=False)
+    )
     if not pads:
+        if source == "three_viewer":
+            raise ValueError("Кусты для редактирования не найдены.")
         return []
 
     pad_by_id = {str(pad.pad_id): pad for pad in pads}
-    raw_configs = st.session_state.setdefault("wt_pad_configs", {})
+    raw_configs = state["wt_pad_configs"]
     changed_pad_ids: set[str] = set()
     updated_any = False
 
     for raw_change in changes:
         if not isinstance(raw_change, Mapping):
+            if source == "three_viewer":
+                raise ValueError("Некорректная правка куста.")
             continue
         pad_id = str(raw_change.get("pad_id") or "").strip()
         pad = pad_by_id.get(pad_id)
         anchor = raw_change.get("anchor")
         if pad is None or not isinstance(anchor, (list, tuple)) or len(anchor) < 3:
+            if source == "three_viewer":
+                raise ValueError(
+                    "Неизвестный куст или некорректные координаты площадки."
+                )
             continue
         try:
             anchor_xyz = [float(anchor[0]), float(anchor[1]), float(anchor[2])]
         except (TypeError, ValueError):
+            if source == "three_viewer":
+                raise ValueError("Координаты площадки должны быть числами.") from None
             continue
         if not all(np.isfinite(anchor_xyz)):
+            if source == "three_viewer":
+                raise ValueError("Координаты площадки должны быть конечными.")
             continue
         current_cfg_raw = raw_configs.get(pad_id)
         current_cfg = (
             current_cfg_raw
             if isinstance(current_cfg_raw, Mapping)
-            else _pad_config_for_ui(pad)
+            else ptc_pad_state.pad_config_for_ui(state, pad)
         )
         anchor_changed = any(
             abs(
@@ -9977,32 +10154,37 @@ def _apply_edit_pad_changes(
         if raw_nds is not None:
             try:
                 normalized_nds = float(raw_nds)
+                if source == "three_viewer" and not np.isfinite(normalized_nds):
+                    raise ValueError("НДС должен быть конечным числом.")
                 if np.isfinite(normalized_nds):
                     normalized_nds %= 360.0
-                    current_nds = float(
-                        current_cfg.get("nds_azimuth_deg", normalized_nds)
-                    ) % 360.0
+                    current_nds = (
+                        float(current_cfg.get("nds_azimuth_deg", normalized_nds))
+                        % 360.0
+                    )
                     nds_updated = abs(current_nds - normalized_nds) > 1e-9
                     next_cfg["nds_azimuth_deg"] = normalized_nds
             except (TypeError, ValueError):
+                if source == "three_viewer":
+                    raise ValueError("Некорректное значение НДС.") from None
                 pass
         if not anchor_changed and not nds_updated:
             continue
         next_cfg[ptc_pad_state.WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY] = True
         raw_configs[pad_id] = next_cfg
-        st.session_state[f"wt_pad_cfg_first_surface_x_{pad_id}"] = float(
+        state[f"wt_pad_cfg_first_surface_x_{pad_id}"] = float(
             next_cfg["first_surface_x"]
         )
-        st.session_state[f"wt_pad_cfg_first_surface_y_{pad_id}"] = float(
+        state[f"wt_pad_cfg_first_surface_y_{pad_id}"] = float(
             next_cfg["first_surface_y"]
         )
-        st.session_state[f"wt_pad_cfg_first_surface_z_{pad_id}"] = float(
+        state[f"wt_pad_cfg_first_surface_z_{pad_id}"] = float(
             next_cfg["first_surface_z"]
         )
         if nds_updated:
-            st.session_state[f"wt_pad_cfg_nds_azimuth_deg_{pad_id}"] = float(
-                next_cfg["nds_azimuth_deg"]
-            ) % 360.0
+            state[f"wt_pad_cfg_nds_azimuth_deg_{pad_id}"] = (
+                float(next_cfg["nds_azimuth_deg"]) % 360.0
+            )
         changed_pad_ids.add(pad_id)
         updated_any = True
 
@@ -10011,9 +10193,7 @@ def _apply_edit_pad_changes(
 
     changed_pads = [pad for pad in pads if str(pad.pad_id) in changed_pad_ids]
     changed_parent_keys = {
-        pilot_parent_key_for_record(well)
-        for pad in changed_pads
-        for well in pad.wells
+        pilot_parent_key_for_record(well) for pad in changed_pads for well in pad.wells
     }
     updated_records = sync_pilot_surfaces_to_parents(
         apply_pad_layout(
@@ -10021,17 +10201,17 @@ def _apply_edit_pad_changes(
             pads=changed_pads,
             plan_by_pad_id={
                 str(pad_id): plan
-                for pad_id, plan in _build_pad_plan_map(pads).items()
+                for pad_id, plan in ptc_pad_state.build_pad_plan_map(
+                    state, pads
+                ).items()
                 if str(pad_id) in changed_pad_ids
             },
         ),
         only_parent_keys=changed_parent_keys,
     )
-    st.session_state["wt_records"] = list(updated_records)
-    st.session_state["wt_pad_last_applied_at"] = datetime.now().strftime(
-        "%Y-%m-%d %H:%M:%S"
-    )
-    st.session_state["wt_pad_auto_applied_on_import"] = False
+    state["wt_records"] = list(updated_records)
+    state["wt_pad_last_applied_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    state["wt_pad_auto_applied_on_import"] = False
     return _queue_surface_edit_feedback(
         _changed_surface_well_names(working_records, updated_records),
         source=(
@@ -10039,22 +10219,34 @@ def _apply_edit_pad_changes(
             if str(source).strip() == "three_viewer"
             else str(source).strip() or "pad_layout"
         ),
+        session_state=state,
     )
 
 
-def _handle_three_edit_event(event: object) -> bool:
+def _handle_three_edit_event(
+    event: object, *, ack_key: str = "wt_three_edit_ack"
+) -> bool:
     return ptc_edit_targets.handle_three_edit_event(
         st.session_state,
         event,
-        apply_changes=lambda changes, source: _apply_edit_targets_changes(
-            changes,
-            source=source,
-        ),
-        apply_pad_changes=lambda changes, source: _apply_edit_pad_changes(
-            changes,
-            source=source,
+        apply_changes=lambda changes, source: (
+            ptc_edit_targets.apply_three_edit_transaction(
+                st.session_state,
+                changes,
+                event.get("pad_changes"),
+                source=source,
+                base_row_factory=WelltrackBatchPlanner._base_row,
+                apply_pad_changes=lambda state, changes, source: (
+                    _apply_edit_pad_changes(
+                        changes,
+                        source=source,
+                        session_state=state,
+                    )
+                ),
+            )
         ),
         bump_three_viewer_nonce=_bump_three_viewer_nonce,
+        ack_key=ack_key,
     )
 
 
@@ -12055,7 +12247,9 @@ def _manual_well_override_rows(
     available_names: list[str],
 ) -> list[dict[str, object]]:
     profiles = _manual_well_calc_profiles()
-    assignments = _manual_well_calc_profile_assignments(available_names=available_names)
+    assignments = _manual_well_calc_profile_assignments(
+        available_names=available_names
+    )
     wells_by_profile: dict[str, list[str]] = {profile_id: [] for profile_id in profiles}
     unassigned_wells: list[str] = []
     for well_name in available_names:
@@ -12102,9 +12296,7 @@ def _render_manual_well_calc_overrides(
 ) -> None:
     _preserve_manual_well_calc_override_widget_state()
     available_names = _unique_well_names(record.name for record in records)
-    assignments = _manual_well_calc_profile_assignments(
-        available_names=available_names
-    )
+    assignments = _manual_well_calc_profile_assignments(available_names=available_names)
     if not available_names:
         return
     base_config = WT_CALC_PARAMS.build_config()
@@ -17689,11 +17881,12 @@ def _find_selected_success(
     )
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_edit_targets.py	26859
+===BEGIN_FILE===	pywp/ptc_edit_targets.py	32164
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, MutableMapping
 import math
+import logging
 
 import pandas as pd
 
@@ -18431,26 +18624,141 @@ def handle_three_edit_event(
     apply_changes: ApplyChangesCallback,
     apply_pad_changes: ApplyChangesCallback | None = None,
     bump_three_viewer_nonce: Callable[[], None],
+    ack_key: str = "wt_three_edit_ack",
 ) -> bool:
     if not isinstance(event, Mapping):
         return False
     if str(event.get("type") or "") != "pywp:editTargets":
         return False
     nonce = str(event.get("nonce") or "")
+    current_revision = str(session_state.get("wt_target_dataset_revision") or "")
+    if current_revision and str(event.get("dataset_revision") or "") != current_revision:
+        # Import can replace wells with the same names. Never replay coordinates
+        # from a previous dataset, even if that operation once succeeded.
+        ack = {"nonce": nonce, "status": "conflict"}
+        if session_state.get(ack_key) == ack:
+            return False
+        session_state[ack_key] = ack
+        return True
+    receipts = dict(session_state.get("wt_three_edit_receipts") or {})
+    if nonce and nonce in receipts:
+        ack = receipts[nonce]
+        if session_state.get(ack_key) != ack:
+            session_state[ack_key] = ack
+            return True
+        return False
     if nonce and nonce == str(session_state.get("wt_last_edit_targets_nonce", "")):
         return False
-    updated_names = list(apply_changes(event.get("changes"), "three_viewer"))
-    if apply_pad_changes is not None:
-        updated_names.extend(
-            apply_pad_changes(event.get("pad_changes"), "three_viewer")
-        )
-    updated_names = unique_well_names(updated_names)
-    if not updated_names:
-        return False
+    try:
+        updated_names = list(apply_changes(event.get("changes"), "three_viewer"))
+        if apply_pad_changes is not None:
+            updated_names.extend(
+                apply_pad_changes(event.get("pad_changes"), "three_viewer")
+            )
+        updated_names = unique_well_names(updated_names)
+    except Exception:
+        # The production callback stages both targets and pads atomically.
+        # Do not expose a traceback or retry a failed operation on every rerun.
+        logging.getLogger(__name__).exception("3D edit operation failed: %s", nonce)
+        if not nonce:
+            raise
+        session_state["wt_last_edit_targets_nonce"] = nonce
+        session_state[ack_key] = {"nonce": nonce, "status": "error"}
+        receipts[nonce] = session_state[ack_key]
+        session_state["wt_three_edit_receipts"] = receipts
+        return True
     if nonce:
         session_state["wt_last_edit_targets_nonce"] = nonce
-    bump_three_viewer_nonce()
-    return True
+        session_state[ack_key] = {
+            "nonce": nonce, "status": "applied" if updated_names else "noop"
+        }
+        receipts[nonce] = session_state[ack_key]
+        session_state["wt_three_edit_receipts"] = receipts
+    if updated_names:
+        bump_three_viewer_nonce()
+    # Deliver an acknowledgement even when the geometry/digest did not change.
+    return bool(nonce or updated_names)
+
+
+def _validate_three_target_changes(state: Mapping[str, object], changes: object) -> None:
+    if changes is None:
+        return
+    if not isinstance(changes, list):
+        raise ValueError("Правки скважин должны быть списком.")
+    if not changes:
+        return
+    records = {str(record.name): record for record in (state.get("wt_records") or [])}
+    seen_names: set[str] = set()
+    for change in changes:
+        if not isinstance(change, Mapping):
+            raise ValueError("Некорректная правка скважины.")
+        name = str(change.get("name") or "").strip()
+        record = records.get(name)
+        if record is None or name in seen_names:
+            raise ValueError("Скважина не найдена или указана повторно.")
+        seen_names.add(name)
+        has_geometry = False
+        if "points" in change:
+            points = change["points"]
+            if not isinstance(points, list):
+                raise ValueError("Правки точек должны быть списком.")
+            indices: set[int] = set()
+            for point in points:
+                index = point.get("index") if isinstance(point, Mapping) else None
+                if (type(index) is not int or not 0 <= index < len(record.points)
+                        or index in indices or edit_target_point(point.get("position")) is None):
+                    raise ValueError("Некорректный индекс или координаты точки.")
+                indices.add(index)
+            has_geometry = bool(points)
+        elif "t1" in change or "t3" in change:
+            if (len(record.points) != 3 or edit_target_point(change.get("t1")) is None
+                    or edit_target_point(change.get("t3")) is None):
+                raise ValueError("Некорректная пара целевых точек.")
+            has_geometry = True
+        has_window = "sidetrack_window" in change
+        if has_window and _sidetrack_window_change(change["sidetrack_window"]) is None:
+            raise ValueError("Некорректная правка окна ЗБС.")
+        if not has_geometry and not has_window:
+            raise ValueError("Правка не содержит координат или окна ЗБС.")
+
+
+def apply_three_edit_transaction(
+    session_state: MutableMapping[str, object],
+    changes: object,
+    pad_changes: object,
+    *,
+    source: str,
+    base_row_factory: BaseRowFactory,
+    apply_pad_changes: Callable[[MutableMapping[str, object], object, str], list[str]],
+) -> list[str]:
+    # The edit functions use copy-on-write for records, configs and feedback.
+    # Share large untouched trajectories/caches; never deepcopy session state.
+    before = dict(session_state)
+    staged = dict(before)
+    _validate_three_target_changes(staged, changes)
+    if pad_changes is not None and not isinstance(pad_changes, list):
+        raise ValueError("Правки кустов должны быть списком.")
+    updated = apply_edit_targets_changes(
+        staged, changes, source=source, base_row_factory=base_row_factory
+    )
+    updated.extend(apply_pad_changes(staged, pad_changes, source))
+    written: list[str] = []
+    try:
+        for key, value in staged.items():
+            if key not in before or value is not before[key]:
+                session_state[key] = value
+                written.append(key)
+        for key in before.keys() - staged.keys():
+            del session_state[key]
+            written.append(key)
+    except Exception:
+        for key in reversed(written):
+            if key in before:
+                session_state[key] = before[key]
+            else:
+                session_state.pop(key, None)
+        raise
+    return unique_well_names(updated)
 
 
 def queue_all_wells_results_focus(
@@ -21575,7 +21883,7 @@ def _render_zbs_actual_match_info(actual_wells: tuple[object, ...]) -> None:
         )
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_page_results.py	66739
+===BEGIN_FILE===	pywp/ptc_page_results.py	66685
 from __future__ import annotations
 
 from dataclasses import asdict, is_dataclass
@@ -21611,6 +21919,7 @@ from pywp.pilot_wells import (
     pilot_name_key_for_record,
     well_name_key,
 )
+from pywp.ui_well_panels import survey_source_coordinates
 from pywp.ui_well_result import (
     SingleWellResultView,
     render_key_metrics,
@@ -23128,7 +23437,7 @@ def render_success_tabs(
             pilot_kop_md_m=pilot_kop_md_m,
             sidetrack_window_point=sidetrack_window_point,
         )
-        survey_export_stations = None
+        survey_export_stations = survey_source_coordinates(selected.stations)
         survey_export_xy_label_suffix = ""
         survey_export_xy_unit = "м"
         survey_export_azi_true_deg = None
@@ -23144,7 +23453,7 @@ def render_success_tabs(
             and survey_export_crs == selected_crs
         ):
             survey_export_stations = transform_stations_to_crs(
-                selected.stations,
+                survey_export_stations,
                 selected_crs,
                 input_crs,
                 rename_columns=False,
@@ -23158,11 +23467,7 @@ def render_success_tabs(
             survey_export_azi_true_deg, survey_export_azi_grid_deg = (
                 ptc_batch_results.survey_export_azimuth_columns(
                     source_stations=selected.stations,
-                    export_stations=(
-                        survey_export_stations
-                        if survey_export_stations is not None
-                        else selected.stations
-                    ),
+                    export_stations=survey_export_stations,
                     source_crs=input_crs,
                     export_crs=survey_export_crs,
                 )
@@ -24283,13 +24588,14 @@ def apply_editor_sidetrack_window_defaults(
         state.pop(SIDETRACK_EDITOR_OVERRIDES_KEY, None)
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_target_import.py	33570
+===BEGIN_FILE===	pywp/ptc_target_import.py	33779
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 import re
+from uuid import uuid4
 
 import numpy as np
 import pandas as pd
@@ -24739,6 +25045,7 @@ def store_imported_records(
 ) -> TargetImportStoreResult:
     """Store parsed target records and run import-time pad auto-layout."""
 
+    session_state["wt_target_dataset_revision"] = uuid4().hex
     normalized_records = list(records)
     well_names = tuple(str(record.name) for record in normalized_records)
     session_state["wt_records"] = list(normalized_records)
@@ -24787,6 +25094,7 @@ def reset_failed_import_state(
 ) -> None:
     """Reset target records after a failed parse without touching old results."""
 
+    session_state["wt_target_dataset_revision"] = uuid4().hex
     session_state["wt_records"] = None
     session_state["wt_records_original"] = None
     session_state["wt_target_import_source_kind"] = ""
@@ -24826,6 +25134,7 @@ def clear_target_import_flow_state(
 ) -> None:
     """Clear imported targets, reference wells, selection, and result state."""
 
+    session_state["wt_target_dataset_revision"] = uuid4().hex
     session_state["wt_records"] = None
     session_state["wt_records_original"] = None
     session_state["wt_target_import_source_kind"] = ""
@@ -26643,394 +26952,3 @@ def single_well_three_payload(
                 "color": "#4B5563",
                 "opacity": 1.0,
                 "size": 5.5,
-                "symbol": "circle",
-                "hover": [
-                    {
-                        "name": "Окно зарезки",
-                        "point": "Окно",
-                    }
-                ],
-                "role": "marker",
-            }
-        )
-        payload["labels"].append(
-            _point_payload_label(
-                "Окно",
-                window_point,
-                "#4B5563",
-                role="control_point_label",
-            )
-        )
-
-    _append_single_well_zero_axes(
-        payload,
-        surface=surface,
-        x_arrays=x_arrays,
-        y_arrays=y_arrays,
-        z_arrays=z_arrays,
-    )
-    payload["bounds"] = _bounds_from_arrays(x_arrays=x_arrays, y_arrays=y_arrays, z_arrays=z_arrays)
-    return ptc_three_payload.optimize_three_payload(payload)
-
-
-def single_well_target_only_three_payload(
-    *,
-    surface: Point3D,
-    t1: Point3D,
-    t3: Point3D,
-    well_name: str = "single_well",
-    color: str = TARGET_COLOR_PRIMARY,
-) -> dict[str, object]:
-    x_arrays: list[np.ndarray] = []
-    y_arrays: list[np.ndarray] = []
-    z_arrays: list[np.ndarray] = []
-    payload = _base_payload(title="3D цели (без траектории)")
-    marker_name = f"{well_name}: цели (без траектории)"
-    target_points, target_labels = _target_marker_points_and_labels(
-        surface=surface,
-        t1=t1,
-        t3=t3,
-    )
-    _append_target_markers(
-        payload,
-        name=marker_name,
-        surface=surface,
-        t1=t1,
-        t3=t3,
-        color=color,
-        size=8.0,
-        symbol="cross",
-        x_arrays=x_arrays,
-        y_arrays=y_arrays,
-        z_arrays=z_arrays,
-    )
-    for label, point in zip(target_labels, target_points, strict=False):
-        payload["labels"].append(
-            _point_payload_label(
-                str(label),
-                point,
-                str(color),
-                role="target_label",
-            )
-        )
-    _append_unique_legend_item(
-        payload,
-        label=marker_name,
-        color=str(color),
-        opacity=1.0,
-        symbol="point",
-    )
-    _append_single_well_zero_axes(
-        payload,
-        surface=surface,
-        x_arrays=x_arrays,
-        y_arrays=y_arrays,
-        z_arrays=z_arrays,
-    )
-    payload["bounds"] = _bounds_from_arrays(
-        x_arrays=x_arrays,
-        y_arrays=y_arrays,
-        z_arrays=z_arrays,
-    )
-    return ptc_three_payload.optimize_three_payload(payload)
-
-
-def all_wells_three_payload(
-    successes: list[SuccessfulWellPlan],
-    *,
-    target_only_wells: list[object] | None = None,
-    reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
-    name_to_color: Mapping[str, str] | None = None,
-    display_name_by_well_name: Mapping[str, str] | None = None,
-    pilot_study_points_by_name: Mapping[str, tuple[Point3D, ...]] | None = None,
-    focus_well_names: tuple[str, ...] = (),
-    render_mode: str = WT_3D_RENDER_FAST,
-    fallback_color: Callable[[int], str] | None = None,
-) -> dict[str, object]:
-    payload = _base_payload(title="Все рассчитанные скважины (3D)")
-    x_arrays: list[np.ndarray] = []
-    y_arrays: list[np.ndarray] = []
-    z_arrays: list[np.ndarray] = []
-    x_focus_arrays: list[np.ndarray] = []
-    y_focus_arrays: list[np.ndarray] = []
-    z_focus_arrays: list[np.ndarray] = []
-    focus_set = _clean_name_set(focus_well_names)
-    color_map = dict(name_to_color or {})
-    pilot_points_map = dict(pilot_study_points_by_name or {})
-    highlighted_reference_well_names = _overview_highlight_reference_well_names(
-        successes=successes,
-        reference_wells=reference_wells,
-    )
-
-    for index, success in enumerate(successes):
-        well_name = str(success.name)
-        is_pilot = is_pilot_name(well_name)
-        display_name = (
-            well_name
-            if is_pilot
-            else _display_well_name(
-                well_name,
-                display_name_by_well_name=display_name_by_well_name,
-            )
-        )
-        color = color_map.get(well_name, _fallback_color(index, fallback_color))
-        pilot_study_points = (
-            _pilot_study_points_for_well(
-                well_name,
-                pilot_points_map,
-                fallback_points=(success.t1, success.t3),
-            )
-            if is_pilot
-            else ()
-        )
-        stations = _maybe_decimated_stations(
-            success.stations,
-            render_mode=render_mode,
-            target_points=WT_3D_FAST_CALC_TARGET_POINTS,
-        )
-        _append_station_line(
-            payload,
-            stations=stations,
-            name=well_name,
-            color=color,
-            width_role="line",
-            dash="solid",
-            hover_name=well_name,
-            x_arrays=x_arrays,
-            y_arrays=y_arrays,
-            z_arrays=z_arrays,
-            focus_arrays=(x_focus_arrays, y_focus_arrays, z_focus_arrays)
-            if _include_name_in_focus(well_name, focus_set)
-            else None,
-        )
-        _append_target_markers(
-            payload,
-            name=f"{well_name}: цели",
-            surface=success.surface,
-            t1=success.t1,
-            t3=success.t3,
-            target_pairs=tuple(getattr(success, "target_pairs", ()) or ()),
-            target_points=pilot_study_points,
-            target_labels=_pilot_study_label_texts(
-                well_name,
-                len(pilot_study_points),
-            )
-            if is_pilot
-            else (),
-            color=color,
-            size=5.0,
-            symbol="circle",
-            x_arrays=x_arrays,
-            y_arrays=y_arrays,
-            z_arrays=z_arrays,
-            focus_arrays=(x_focus_arrays, y_focus_arrays, z_focus_arrays)
-            if _include_name_in_focus(well_name, focus_set)
-            else None,
-        )
-        payload["labels"].append(_well_name_label(display_name, success.t3, color))
-        if pilot_study_points:
-            _append_pilot_study_labels(
-                payload,
-                pilot_name=well_name,
-                study_points=pilot_study_points,
-                color=color,
-            )
-        _append_unique_legend_item(payload, label=well_name, color=color, opacity=1.0)
-
-    _append_reference_wells(
-        payload,
-        reference_wells=reference_wells,
-        render_mode=render_mode,
-        x_arrays=x_arrays,
-        y_arrays=y_arrays,
-        z_arrays=z_arrays,
-        highlighted_names=highlighted_reference_well_names,
-    )
-    default_reference_label_keys = (
-        {
-            _reference_identity_key(well)
-            for well in reference_wells
-            if well_name_key(getattr(well, "name", "")) in highlighted_reference_well_names
-        }
-        if str(render_mode).strip() == WT_3D_RENDER_FAST
-        else {_reference_identity_key(well) for well in reference_wells}
-    )
-    _set_optional_reference_name_labels(
-        payload,
-        [
-            well
-            for well in reference_wells
-            if _reference_identity_key(well) not in default_reference_label_keys
-        ],
-    )
-
-    for target_only in target_only_wells or ():
-        well_name = str(getattr(target_only, "name"))
-        color = color_map.get(well_name, "#6B7280")
-        target_points = tuple(getattr(target_only, "target_points", ()) or ())
-        target_labels = tuple(getattr(target_only, "target_labels", ()) or ())
-        target_focus_arrays = (
-            (x_focus_arrays, y_focus_arrays, z_focus_arrays)
-            if _include_target_only_in_focus(
-                well_name=well_name,
-                focus_set=focus_set,
-                target_points=target_points,
-                target_labels=target_labels,
-            )
-            else None
-        )
-        _append_target_markers(
-            payload,
-            name=f"{well_name}: цели (без траектории)",
-            surface=getattr(target_only, "surface"),
-            t1=getattr(target_only, "t1"),
-            t3=getattr(target_only, "t3"),
-            target_pairs=tuple(getattr(target_only, "target_pairs", ()) or ()),
-            target_points=target_points,
-            target_labels=target_labels,
-            color=color,
-            size=10.0,
-            symbol="cross",
-            x_arrays=x_arrays,
-            y_arrays=y_arrays,
-            z_arrays=z_arrays,
-            focus_arrays=target_focus_arrays,
-            hover_extra={
-                "status": str(getattr(target_only, "status", "") or ""),
-                "problem": str(getattr(target_only, "problem", "") or ""),
-            },
-        )
-        payload["labels"].append(_well_name_label(well_name, getattr(target_only, "t3"), color))
-        _append_unique_legend_item(
-            payload,
-            label=f"{well_name}: цели (без траектории)",
-            color=color,
-            opacity=1.0,
-            symbol="point",
-        )
-
-    payload["bounds"] = _bounds_from_arrays(
-        x_arrays=x_focus_arrays or x_arrays,
-        y_arrays=y_focus_arrays or y_arrays,
-        z_arrays=z_focus_arrays or z_arrays,
-    )
-    return ptc_three_payload.optimize_three_payload(payload)
-
-
-def _include_target_only_in_focus(
-    *,
-    well_name: str,
-    focus_set: set[str],
-    target_points: tuple[Point3D, ...],
-    target_labels: tuple[str, ...],
-) -> bool:
-    if _include_name_in_focus(well_name, focus_set):
-        return True
-    if not focus_set:
-        return True
-    # ZBS has no source wellhead in target records and is intentionally not a
-    # pad member. Keep its two editable targets in camera bounds for focused
-    # views so a failed sidetrack can still be fixed from 3D.
-    labels = tuple(label.lower() for label in target_labels)
-    return len(target_points) == 2 and labels == ("t1", "t3")
-
-
-def anticollision_three_payload(
-    analysis: AntiCollisionAnalysis,
-    *,
-    previous_successes_by_name: Mapping[str, SuccessfulWellPlan] | None = None,
-    target_only_wells: list[object] | None = None,
-    reference_wells: tuple[ImportedTrajectoryWell, ...] = (),
-    name_to_color: Mapping[str, str] | None = None,
-    display_name_by_well_name: Mapping[str, str] | None = None,
-    pilot_study_points_by_name: Mapping[str, tuple[Point3D, ...]] | None = None,
-    focus_well_names: tuple[str, ...] = (),
-    render_mode: str = WT_3D_RENDER_FAST,
-    show_sidetrack_relative_cones: bool = False,
-) -> dict[str, object]:
-    payload = _base_payload(title="Anti-collision: 3D конусы неопределённости")
-    payload["anti_collision_layer_state"] = {
-        "cones": True,
-        "overlaps": True,
-        "segments": True,
-        "sidetrack_relative_cones": bool(show_sidetrack_relative_cones),
-    }
-    x_arrays: list[np.ndarray] = []
-    y_arrays: list[np.ndarray] = []
-    z_arrays: list[np.ndarray] = []
-    x_focus_arrays: list[np.ndarray] = []
-    y_focus_arrays: list[np.ndarray] = []
-    z_focus_arrays: list[np.ndarray] = []
-    focus_set = _clean_name_set(focus_well_names)
-    color_map = dict(name_to_color or {})
-    pilot_points_map = dict(pilot_study_points_by_name or {})
-    loaded_reference_wells = tuple(reference_wells)
-    analysis_reference_objects = tuple(
-        well for well in analysis.wells if bool(well.is_reference_only)
-    )
-    collision_display_overlays = collision_display_overlays_by_well(analysis)
-    focus_reference_names = (
-        _anticollision_reference_cone_focus_names(analysis)
-        if str(render_mode).strip() == WT_3D_RENDER_FAST
-        else set()
-    )
-    well_lookup = {str(well.name): well for well in analysis.wells}
-    aggregated_reference_wells: list[object] = []
-
-    for well in analysis.wells:
-        well_name = str(well.name)
-        is_pilot = is_pilot_name(well_name)
-        display_name = (
-            well_name
-            if is_pilot
-            else _display_well_name(
-                well_name,
-                display_name_by_well_name=display_name_by_well_name,
-            )
-        )
-        overlay = collision_display_overlays.get(well_name, well.overlay)
-        is_reference_only = bool(well.is_reference_only)
-        is_focus_reference = well_name in focus_reference_names
-        if (
-            str(render_mode).strip() == WT_3D_RENDER_FAST
-            and is_reference_only
-            and not is_focus_reference
-        ):
-            aggregated_reference_wells.append(well)
-            continue
-        well_label = _analysis_well_label(well)
-        include_in_focus = (not focus_set and not is_reference_only) or (
-            bool(focus_set) and well_name in focus_set
-        )
-        focus_arrays = (
-            (x_focus_arrays, y_focus_arrays, z_focus_arrays)
-            if include_in_focus
-            else None
-        )
-        tube_mesh = (
-            build_uncertainty_tube_mesh(overlay)
-            if (
-                str(render_mode).strip() != WT_3D_RENDER_FAST
-                or not is_reference_only
-                or is_focus_reference
-            )
-            else None
-        )
-        if tube_mesh is not None:
-            _append_mesh(
-                payload,
-                vertices_xyz=tube_mesh.vertices_xyz,
-                faces_ijk=np.column_stack([tube_mesh.i, tube_mesh.j, tube_mesh.k]),
-                name=f"{well_label} cone",
-                color=str(well.color),
-                opacity=0.10,
-                role="cone",
-                x_arrays=x_arrays,
-                y_arrays=y_arrays,
-                z_arrays=z_arrays,
-                focus_arrays=focus_arrays,
-            )
-        if overlay.samples and (
-            str(render_mode).strip() != WT_3D_RENDER_FAST or not is_reference_only
-        ):
-            terminal_ring = np.asarray(overlay.samples[-1].ring_xyz, dtype=float)

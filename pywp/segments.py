@@ -47,6 +47,8 @@ def _make_md_grid(md_start: float, length_m: float, md_step_m: float) -> np.ndar
         raise ValueError("md_start, length_m and md_step_m must be numbers") from exc
     if not all(np.isfinite(value) for value in (md_start, length_m, md_step_m)):
         raise ValueError("md_start, length_m and md_step_m must be finite")
+    if md_start < 0.0:
+        raise ValueError("md_start must be non-negative")
     if length_m < 0.0:
         raise ValueError("length_m must be non-negative")
     if md_step_m <= 0.0:
@@ -182,12 +184,20 @@ class BuildSegment(Segment):
         return dogleg_deg / self.dls_deg_per_30m * 30.0
 
     def generate(self, md_start: float, md_step_m: float) -> pd.DataFrame:
-        md = _make_md_grid(md_start, self.length_m, md_step_m)
-        if self.length_m <= 1e-9:
+        length_m = self.length_m
+        md = _make_md_grid(md_start, length_m, md_step_m)
+        if self.interpolation_method not in (INTERPOLATION_SLERP, INTERPOLATION_RODRIGUES):
+            raise ValueError(
+                f"Unknown interpolation_method: {self.interpolation_method!r}. "
+                f"Expected {INTERPOLATION_SLERP!r} or {INTERPOLATION_RODRIGUES!r}."
+            )
+        # A representable positive length has both start and end MD stations,
+        # however small it is. Only an exactly zero length has one direction.
+        if length_m == 0.0:
             inc = np.array([self.inc_to_deg], dtype=float)
             azi = np.array([self.azi_to_deg], dtype=float)
         else:
-            t = (md - md_start) / self.length_m
+            t = (md - float(md_start)) / length_m
             t[0] = 0.0
             t[-1] = 1.0
             direction_from = _direction_vector(inc_deg=self.inc_from_deg, azi_deg=self.azi_from_deg)
@@ -196,11 +206,6 @@ class BuildSegment(Segment):
                 directions = _slerp_directions(direction_from=direction_from, direction_to=direction_to, t=t)
             elif self.interpolation_method == INTERPOLATION_RODRIGUES:
                 directions = _rodrigues_directions(direction_from=direction_from, direction_to=direction_to, t=t)
-            else:
-                raise ValueError(
-                    f"Unknown interpolation_method: {self.interpolation_method!r}. "
-                    f"Expected {INTERPOLATION_SLERP!r} or {INTERPOLATION_RODRIGUES!r}."
-                )
             inc, azi = _angles_from_directions(directions=directions)
 
         return pd.DataFrame(

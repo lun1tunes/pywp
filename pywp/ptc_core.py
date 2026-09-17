@@ -10,7 +10,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime
 from time import perf_counter
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, MutableMapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -1324,18 +1324,22 @@ def _render_three_payload(
         payload=payload,
         payload_overrides=payload_overrides,
     )
+    component_key = str(
+        (payload_overrides or {}).get("component_key")
+        or payload.get("title")
+        or f"three-{height}"
+    )
+    ack_key = f"wt_three_edit_ack:{component_key}"
     with container:
         edit_event = render_local_three_scene(
             payload,
             height=height,
             instance_token=int(st.session_state.get("wt_three_viewer_nonce", 0)),
-            key=str(
-                (payload_overrides or {}).get("component_key")
-                or payload.get("title")
-                or f"three-{height}"
-            ),
+            edit_ack=st.session_state.get(ack_key),
+            dataset_revision=str(st.session_state.get("wt_target_dataset_revision") or ""),
+            key=component_key,
         )
-    if _handle_three_edit_event(edit_event):
+    if _handle_three_edit_event(edit_event, ack_key=ack_key):
         # The results and run sections are rendered inside Streamlit fragments.
         # A local 3D edit must refresh only that fragment; a full app rerun
         # resets unrelated widget/layout state and causes visible scroll/focus
@@ -1702,6 +1706,10 @@ def _update_uncertainty_model_cache_digest(
                 float(model.sample_step_m),
                 float(model.min_refined_step_m),
                 float(model.directional_refine_threshold_deg),
+                float(model.max_display_ellipses),
+                float(model.ellipse_points),
+                float(model.min_display_radius_m),
+                float(model.near_vertical_isotropic_threshold_deg),
                 float(model.iscwsa_environment.gtot_mps2),
                 float(model.iscwsa_environment.mtot_nt),
                 float(model.iscwsa_environment.dip_deg),
@@ -2566,20 +2574,20 @@ def _queue_surface_edit_feedback(
     changed_well_names: Iterable[object],
     *,
     source: str,
+    session_state: MutableMapping[str, object] | None = None,
 ) -> list[str]:
+    state = st.session_state if session_state is None else session_state
     changed_names = _unique_well_names(changed_well_names)
     if not changed_names:
         return []
 
     existing_highlighted_names = _unique_well_names(
         [
-            *(st.session_state.get("wt_edit_targets_pending_names") or []),
-            *(st.session_state.get("wt_edit_targets_highlight_names") or []),
+            *(state.get("wt_edit_targets_pending_names") or []),
+            *(state.get("wt_edit_targets_highlight_names") or []),
         ]
     )
-    existing_highlight_points_raw = st.session_state.get(
-        "wt_edit_targets_highlight_points"
-    )
+    existing_highlight_points_raw = state.get("wt_edit_targets_highlight_points")
     existing_highlight_points: dict[str, list[int]] = {}
     if isinstance(existing_highlight_points_raw, Mapping):
         for raw_name, raw_indices in existing_highlight_points_raw.items():
@@ -2593,21 +2601,19 @@ def _queue_surface_edit_feedback(
     # A pad edit invalidates only the wells whose surface actually moved.
     # Keep the anti-collision snapshot and its per-well/pair caches: the next
     # targeted trajectory run must be able to reuse every untouched pad.
-    current_records = list(st.session_state.get("wt_records") or [])
+    current_records = list(state.get("wt_records") or [])
     if current_records:
         ptc_edit_targets.invalidate_results_for_edited_targets(
-            st.session_state,
+            state,
             records=current_records,
             edited_names=changed_names,
             base_row_factory=WelltrackBatchPlanner._base_row,
         )
-    st.session_state["wt_last_error"] = ""
-    st.session_state["wt_last_run_at"] = ""
-    st.session_state["wt_last_runtime_s"] = None
-    st.session_state["wt_last_run_log_lines"] = []
-    pending_names = _unique_well_names(
-        [*existing_highlighted_names, *changed_names]
-    )
+    state["wt_last_error"] = ""
+    state["wt_last_run_at"] = ""
+    state["wt_last_runtime_s"] = None
+    state["wt_last_run_log_lines"] = []
+    pending_names = _unique_well_names([*existing_highlighted_names, *changed_names])
     for well_name in changed_names:
         row_indices = set(existing_highlight_points.get(well_name, []))
         row_indices.add(0)
@@ -2618,17 +2624,17 @@ def _queue_surface_edit_feedback(
         for well_name in pending_names
         if existing_highlight_points.get(well_name)
     }
-    st.session_state["wt_edit_targets_pending_names"] = list(pending_names)
-    st.session_state["wt_edit_targets_highlight_names"] = [
+    state["wt_edit_targets_pending_names"] = list(pending_names)
+    state["wt_edit_targets_highlight_names"] = [
         well_name for well_name in pending_names if well_name in highlight_points
     ]
-    st.session_state["wt_edit_targets_highlight_points"] = highlight_points
-    st.session_state["wt_edit_targets_applied"] = list(changed_names)
-    st.session_state["wt_edit_targets_applied_source"] = source
-    st.session_state["wt_edit_targets_last_source"] = source
-    st.session_state.pop("wt_edit_targets_applied_note", None)
-    st.session_state["wt_pending_selected_names"] = list(pending_names)
-    _queue_all_wells_results_focus()
+    state["wt_edit_targets_highlight_points"] = highlight_points
+    state["wt_edit_targets_applied"] = list(changed_names)
+    state["wt_edit_targets_applied_source"] = source
+    state["wt_edit_targets_last_source"] = source
+    state.pop("wt_edit_targets_applied_note", None)
+    state["wt_pending_selected_names"] = list(pending_names)
+    ptc_edit_targets.queue_all_wells_results_focus(state)
     return changed_names
 
 
@@ -2677,45 +2683,61 @@ def _apply_edit_pad_changes(
     changes: object,
     *,
     source: str = "3d",
+    session_state: MutableMapping[str, object] | None = None,
 ) -> list[str]:
+    state = st.session_state if session_state is None else session_state
     if not isinstance(changes, list) or not changes:
         return []
     base_records = list(
-        st.session_state.get("wt_records_original")
-        or st.session_state.get("wt_records")
-        or []
+        state.get("wt_records_original") or state.get("wt_records") or []
     )
-    working_records = list(st.session_state.get("wt_records") or base_records)
+    working_records = list(state.get("wt_records") or base_records)
     if not base_records:
+        if source == "three_viewer":
+            raise ValueError("Нет исходных скважин для редактирования куста.")
         return []
-    pads = _ensure_pad_configs(base_records=base_records)
+    pads = ptc_pad_state.ensure_pad_configs(
+        state, base_records=visible_well_records(base_records, include_zbs=False)
+    )
     if not pads:
+        if source == "three_viewer":
+            raise ValueError("Кусты для редактирования не найдены.")
         return []
 
     pad_by_id = {str(pad.pad_id): pad for pad in pads}
-    raw_configs = st.session_state.setdefault("wt_pad_configs", {})
+    raw_configs = state["wt_pad_configs"]
     changed_pad_ids: set[str] = set()
     updated_any = False
 
     for raw_change in changes:
         if not isinstance(raw_change, Mapping):
+            if source == "three_viewer":
+                raise ValueError("Некорректная правка куста.")
             continue
         pad_id = str(raw_change.get("pad_id") or "").strip()
         pad = pad_by_id.get(pad_id)
         anchor = raw_change.get("anchor")
         if pad is None or not isinstance(anchor, (list, tuple)) or len(anchor) < 3:
+            if source == "three_viewer":
+                raise ValueError(
+                    "Неизвестный куст или некорректные координаты площадки."
+                )
             continue
         try:
             anchor_xyz = [float(anchor[0]), float(anchor[1]), float(anchor[2])]
         except (TypeError, ValueError):
+            if source == "three_viewer":
+                raise ValueError("Координаты площадки должны быть числами.") from None
             continue
         if not all(np.isfinite(anchor_xyz)):
+            if source == "three_viewer":
+                raise ValueError("Координаты площадки должны быть конечными.")
             continue
         current_cfg_raw = raw_configs.get(pad_id)
         current_cfg = (
             current_cfg_raw
             if isinstance(current_cfg_raw, Mapping)
-            else _pad_config_for_ui(pad)
+            else ptc_pad_state.pad_config_for_ui(state, pad)
         )
         anchor_changed = any(
             abs(
@@ -2736,32 +2758,37 @@ def _apply_edit_pad_changes(
         if raw_nds is not None:
             try:
                 normalized_nds = float(raw_nds)
+                if source == "three_viewer" and not np.isfinite(normalized_nds):
+                    raise ValueError("НДС должен быть конечным числом.")
                 if np.isfinite(normalized_nds):
                     normalized_nds %= 360.0
-                    current_nds = float(
-                        current_cfg.get("nds_azimuth_deg", normalized_nds)
-                    ) % 360.0
+                    current_nds = (
+                        float(current_cfg.get("nds_azimuth_deg", normalized_nds))
+                        % 360.0
+                    )
                     nds_updated = abs(current_nds - normalized_nds) > 1e-9
                     next_cfg["nds_azimuth_deg"] = normalized_nds
             except (TypeError, ValueError):
+                if source == "three_viewer":
+                    raise ValueError("Некорректное значение НДС.") from None
                 pass
         if not anchor_changed and not nds_updated:
             continue
         next_cfg[ptc_pad_state.WT_PAD_ALLOW_SOURCE_SURFACE_EDIT_KEY] = True
         raw_configs[pad_id] = next_cfg
-        st.session_state[f"wt_pad_cfg_first_surface_x_{pad_id}"] = float(
+        state[f"wt_pad_cfg_first_surface_x_{pad_id}"] = float(
             next_cfg["first_surface_x"]
         )
-        st.session_state[f"wt_pad_cfg_first_surface_y_{pad_id}"] = float(
+        state[f"wt_pad_cfg_first_surface_y_{pad_id}"] = float(
             next_cfg["first_surface_y"]
         )
-        st.session_state[f"wt_pad_cfg_first_surface_z_{pad_id}"] = float(
+        state[f"wt_pad_cfg_first_surface_z_{pad_id}"] = float(
             next_cfg["first_surface_z"]
         )
         if nds_updated:
-            st.session_state[f"wt_pad_cfg_nds_azimuth_deg_{pad_id}"] = float(
-                next_cfg["nds_azimuth_deg"]
-            ) % 360.0
+            state[f"wt_pad_cfg_nds_azimuth_deg_{pad_id}"] = (
+                float(next_cfg["nds_azimuth_deg"]) % 360.0
+            )
         changed_pad_ids.add(pad_id)
         updated_any = True
 
@@ -2770,9 +2797,7 @@ def _apply_edit_pad_changes(
 
     changed_pads = [pad for pad in pads if str(pad.pad_id) in changed_pad_ids]
     changed_parent_keys = {
-        pilot_parent_key_for_record(well)
-        for pad in changed_pads
-        for well in pad.wells
+        pilot_parent_key_for_record(well) for pad in changed_pads for well in pad.wells
     }
     updated_records = sync_pilot_surfaces_to_parents(
         apply_pad_layout(
@@ -2780,17 +2805,17 @@ def _apply_edit_pad_changes(
             pads=changed_pads,
             plan_by_pad_id={
                 str(pad_id): plan
-                for pad_id, plan in _build_pad_plan_map(pads).items()
+                for pad_id, plan in ptc_pad_state.build_pad_plan_map(
+                    state, pads
+                ).items()
                 if str(pad_id) in changed_pad_ids
             },
         ),
         only_parent_keys=changed_parent_keys,
     )
-    st.session_state["wt_records"] = list(updated_records)
-    st.session_state["wt_pad_last_applied_at"] = datetime.now().strftime(
-        "%Y-%m-%d %H:%M:%S"
-    )
-    st.session_state["wt_pad_auto_applied_on_import"] = False
+    state["wt_records"] = list(updated_records)
+    state["wt_pad_last_applied_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    state["wt_pad_auto_applied_on_import"] = False
     return _queue_surface_edit_feedback(
         _changed_surface_well_names(working_records, updated_records),
         source=(
@@ -2798,22 +2823,34 @@ def _apply_edit_pad_changes(
             if str(source).strip() == "three_viewer"
             else str(source).strip() or "pad_layout"
         ),
+        session_state=state,
     )
 
 
-def _handle_three_edit_event(event: object) -> bool:
+def _handle_three_edit_event(
+    event: object, *, ack_key: str = "wt_three_edit_ack"
+) -> bool:
     return ptc_edit_targets.handle_three_edit_event(
         st.session_state,
         event,
-        apply_changes=lambda changes, source: _apply_edit_targets_changes(
-            changes,
-            source=source,
-        ),
-        apply_pad_changes=lambda changes, source: _apply_edit_pad_changes(
-            changes,
-            source=source,
+        apply_changes=lambda changes, source: (
+            ptc_edit_targets.apply_three_edit_transaction(
+                st.session_state,
+                changes,
+                event.get("pad_changes"),
+                source=source,
+                base_row_factory=WelltrackBatchPlanner._base_row,
+                apply_pad_changes=lambda state, changes, source: (
+                    _apply_edit_pad_changes(
+                        changes,
+                        source=source,
+                        session_state=state,
+                    )
+                ),
+            )
         ),
         bump_three_viewer_nonce=_bump_three_viewer_nonce,
+        ack_key=ack_key,
     )
 
 
@@ -4814,7 +4851,9 @@ def _manual_well_override_rows(
     available_names: list[str],
 ) -> list[dict[str, object]]:
     profiles = _manual_well_calc_profiles()
-    assignments = _manual_well_calc_profile_assignments(available_names=available_names)
+    assignments = _manual_well_calc_profile_assignments(
+        available_names=available_names
+    )
     wells_by_profile: dict[str, list[str]] = {profile_id: [] for profile_id in profiles}
     unassigned_wells: list[str] = []
     for well_name in available_names:
@@ -4861,9 +4900,7 @@ def _render_manual_well_calc_overrides(
 ) -> None:
     _preserve_manual_well_calc_override_widget_state()
     available_names = _unique_well_names(record.name for record in records)
-    assignments = _manual_well_calc_profile_assignments(
-        available_names=available_names
-    )
+    assignments = _manual_well_calc_profile_assignments(available_names=available_names)
     if not available_names:
         return
     base_config = WT_CALC_PARAMS.build_config()

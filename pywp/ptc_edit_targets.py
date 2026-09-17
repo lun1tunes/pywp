@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, MutableMapping
 import math
+import logging
 
 import pandas as pd
 
@@ -739,26 +740,141 @@ def handle_three_edit_event(
     apply_changes: ApplyChangesCallback,
     apply_pad_changes: ApplyChangesCallback | None = None,
     bump_three_viewer_nonce: Callable[[], None],
+    ack_key: str = "wt_three_edit_ack",
 ) -> bool:
     if not isinstance(event, Mapping):
         return False
     if str(event.get("type") or "") != "pywp:editTargets":
         return False
     nonce = str(event.get("nonce") or "")
+    current_revision = str(session_state.get("wt_target_dataset_revision") or "")
+    if current_revision and str(event.get("dataset_revision") or "") != current_revision:
+        # Import can replace wells with the same names. Never replay coordinates
+        # from a previous dataset, even if that operation once succeeded.
+        ack = {"nonce": nonce, "status": "conflict"}
+        if session_state.get(ack_key) == ack:
+            return False
+        session_state[ack_key] = ack
+        return True
+    receipts = dict(session_state.get("wt_three_edit_receipts") or {})
+    if nonce and nonce in receipts:
+        ack = receipts[nonce]
+        if session_state.get(ack_key) != ack:
+            session_state[ack_key] = ack
+            return True
+        return False
     if nonce and nonce == str(session_state.get("wt_last_edit_targets_nonce", "")):
         return False
-    updated_names = list(apply_changes(event.get("changes"), "three_viewer"))
-    if apply_pad_changes is not None:
-        updated_names.extend(
-            apply_pad_changes(event.get("pad_changes"), "three_viewer")
-        )
-    updated_names = unique_well_names(updated_names)
-    if not updated_names:
-        return False
+    try:
+        updated_names = list(apply_changes(event.get("changes"), "three_viewer"))
+        if apply_pad_changes is not None:
+            updated_names.extend(
+                apply_pad_changes(event.get("pad_changes"), "three_viewer")
+            )
+        updated_names = unique_well_names(updated_names)
+    except Exception:
+        # The production callback stages both targets and pads atomically.
+        # Do not expose a traceback or retry a failed operation on every rerun.
+        logging.getLogger(__name__).exception("3D edit operation failed: %s", nonce)
+        if not nonce:
+            raise
+        session_state["wt_last_edit_targets_nonce"] = nonce
+        session_state[ack_key] = {"nonce": nonce, "status": "error"}
+        receipts[nonce] = session_state[ack_key]
+        session_state["wt_three_edit_receipts"] = receipts
+        return True
     if nonce:
         session_state["wt_last_edit_targets_nonce"] = nonce
-    bump_three_viewer_nonce()
-    return True
+        session_state[ack_key] = {
+            "nonce": nonce, "status": "applied" if updated_names else "noop"
+        }
+        receipts[nonce] = session_state[ack_key]
+        session_state["wt_three_edit_receipts"] = receipts
+    if updated_names:
+        bump_three_viewer_nonce()
+    # Deliver an acknowledgement even when the geometry/digest did not change.
+    return bool(nonce or updated_names)
+
+
+def _validate_three_target_changes(state: Mapping[str, object], changes: object) -> None:
+    if changes is None:
+        return
+    if not isinstance(changes, list):
+        raise ValueError("Правки скважин должны быть списком.")
+    if not changes:
+        return
+    records = {str(record.name): record for record in (state.get("wt_records") or [])}
+    seen_names: set[str] = set()
+    for change in changes:
+        if not isinstance(change, Mapping):
+            raise ValueError("Некорректная правка скважины.")
+        name = str(change.get("name") or "").strip()
+        record = records.get(name)
+        if record is None or name in seen_names:
+            raise ValueError("Скважина не найдена или указана повторно.")
+        seen_names.add(name)
+        has_geometry = False
+        if "points" in change:
+            points = change["points"]
+            if not isinstance(points, list):
+                raise ValueError("Правки точек должны быть списком.")
+            indices: set[int] = set()
+            for point in points:
+                index = point.get("index") if isinstance(point, Mapping) else None
+                if (type(index) is not int or not 0 <= index < len(record.points)
+                        or index in indices or edit_target_point(point.get("position")) is None):
+                    raise ValueError("Некорректный индекс или координаты точки.")
+                indices.add(index)
+            has_geometry = bool(points)
+        elif "t1" in change or "t3" in change:
+            if (len(record.points) != 3 or edit_target_point(change.get("t1")) is None
+                    or edit_target_point(change.get("t3")) is None):
+                raise ValueError("Некорректная пара целевых точек.")
+            has_geometry = True
+        has_window = "sidetrack_window" in change
+        if has_window and _sidetrack_window_change(change["sidetrack_window"]) is None:
+            raise ValueError("Некорректная правка окна ЗБС.")
+        if not has_geometry and not has_window:
+            raise ValueError("Правка не содержит координат или окна ЗБС.")
+
+
+def apply_three_edit_transaction(
+    session_state: MutableMapping[str, object],
+    changes: object,
+    pad_changes: object,
+    *,
+    source: str,
+    base_row_factory: BaseRowFactory,
+    apply_pad_changes: Callable[[MutableMapping[str, object], object, str], list[str]],
+) -> list[str]:
+    # The edit functions use copy-on-write for records, configs and feedback.
+    # Share large untouched trajectories/caches; never deepcopy session state.
+    before = dict(session_state)
+    staged = dict(before)
+    _validate_three_target_changes(staged, changes)
+    if pad_changes is not None and not isinstance(pad_changes, list):
+        raise ValueError("Правки кустов должны быть списком.")
+    updated = apply_edit_targets_changes(
+        staged, changes, source=source, base_row_factory=base_row_factory
+    )
+    updated.extend(apply_pad_changes(staged, pad_changes, source))
+    written: list[str] = []
+    try:
+        for key, value in staged.items():
+            if key not in before or value is not before[key]:
+                session_state[key] = value
+                written.append(key)
+        for key in before.keys() - staged.keys():
+            del session_state[key]
+            written.append(key)
+    except Exception:
+        for key in reversed(written):
+            if key in before:
+                session_state[key] = before[key]
+            else:
+                session_state.pop(key, None)
+        raise
+    return unique_well_names(updated)
 
 
 def queue_all_wells_results_focus(

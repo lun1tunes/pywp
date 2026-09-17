@@ -57,6 +57,18 @@ def _with_export_tvd(display_df: pd.DataFrame) -> pd.DataFrame:
     return export_df
 
 
+def survey_source_coordinates(stations: pd.DataFrame) -> pd.DataFrame:
+    """Prepare source-CRS metre columns before any export XY transformation.
+
+    X/Y are the authoritative calculated coordinates (East/North). Some
+    pilot and sidetrack builders omit their N/E aliases, and concatenating
+    such surveys leaves partially empty columns. Rebuild both aliases on
+    an export copy, including for results already held in session caches.
+    Never call this with X/Y already converted to the output CRS.
+    """
+    return stations.assign(N_m=stations["Y_m"], E_m=stations["X_m"])
+
+
 def survey_export_dataframe(
     display_df: pd.DataFrame,
     *,

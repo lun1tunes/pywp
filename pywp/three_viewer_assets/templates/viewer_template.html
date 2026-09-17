@@ -955,29 +955,6 @@
         font-size: 10px;
       }
 
-      .edit-pad-summary-row {
-        display: flex;
-        align-items: baseline;
-        justify-content: space-between;
-        gap: 10px;
-        color: #475569;
-        font-family: inherit;
-        font-size: 10px;
-      }
-
-      .edit-pad-summary-row strong {
-        color: #0f172a;
-        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-        font-size: 11px;
-        font-weight: 700;
-      }
-
-      .edit-pad-summary-total {
-        margin-top: 2px;
-        padding-top: 4px;
-        border-top: 1px solid rgba(15,23,42,0.08);
-      }
-
       #edit-inspector {
         display: none;
         position: static;
@@ -1009,6 +986,14 @@
         color: #64748b;
         font-size: 10px;
         line-height: 1.3;
+      }
+
+      #edit-dataset-notice {
+        flex: 0 0 auto;
+        margin: 2px 10px 8px;
+        padding: 5px 8px;
+        border-top: 1px solid rgba(148,163,184,0.2);
+        line-height: 1.35;
       }
 
       .edit-inspector-input {
@@ -1141,49 +1126,6 @@
         color: #64748b;
         font-size: 10px;
         line-height: 1.35;
-      }
-
-      .edit-pad-wells {
-        display: flex;
-        flex-direction: column;
-        gap: 3px;
-        max-height: 150px;
-        overflow: auto;
-      }
-
-      .edit-pad-well-row {
-        display: grid;
-        grid-template-columns: minmax(0, 1fr) auto auto;
-        gap: 5px;
-        align-items: center;
-        width: 100%;
-        border: 1px solid transparent;
-        border-radius: 5px;
-        background: transparent;
-        cursor: pointer;
-        color: #475569;
-        font-family: inherit;
-        font-size: 10px;
-        padding: 3px 4px;
-        text-align: left;
-      }
-
-      .edit-pad-well-row > span {
-        color: #0f172a;
-        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-        font-size: 11px;
-      }
-
-      .edit-pad-well-row:hover {
-        border-color: rgba(37,99,235,0.20);
-        background: rgba(37,99,235,0.07);
-      }
-
-      .edit-pad-well-row strong {
-        font-weight: 600;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
       }
 
       #edit-toolbox.is-pad-selection #edit-points-controls,
@@ -1997,10 +1939,6 @@
           <div class="edit-inspector-section-label">Куст</div>
           <div id="edit-pad-summary-title" class="edit-inspector-title"></div>
           <div id="edit-pad-summary-mode" class="edit-inspector-subtitle"></div>
-          <div class="edit-pad-summary-row"><span>ΔX / ΔY</span><strong><span id="edit-pad-delta-x">0,0 м</span> / <span id="edit-pad-delta-y">0,0 м</span></strong></div>
-          <div class="edit-pad-summary-row"><span>Anchor X / Y</span><strong><span id="edit-pad-final-x">0,0 м</span> / <span id="edit-pad-final-y">0,0 м</span></strong></div>
-          <div class="edit-pad-summary-row"><span>НДС</span><strong id="edit-pad-final-nds">0,0°</strong></div>
-          <div id="edit-pad-well-list" class="edit-pad-wells"></div>
         </div>
 
       </div>
@@ -7441,12 +7379,6 @@
         const editPadSummary = document.getElementById("edit-pad-summary");
         const editPadSummaryTitle = document.getElementById("edit-pad-summary-title");
         const editPadSummaryMode = document.getElementById("edit-pad-summary-mode");
-        const editPadDeltaX = document.getElementById("edit-pad-delta-x");
-        const editPadDeltaY = document.getElementById("edit-pad-delta-y");
-        const editPadFinalX = document.getElementById("edit-pad-final-x");
-        const editPadFinalY = document.getElementById("edit-pad-final-y");
-        const editPadFinalNds = document.getElementById("edit-pad-final-nds");
-        const editPadWellList = document.getElementById("edit-pad-well-list");
         const editWarningToast = document.getElementById("edit-warning-toast");
         const editWarningHideBtn = document.getElementById("edit-warning-hide-btn");
         const hasEditUiElements = Boolean(
@@ -7480,7 +7412,7 @@
         let editMoveScope = "point"; // point | well | after; multi-selection follows the legend selection
         let editTransformMode = "move"; // "move" | "rotate"
         const editHandles = []; // {mesh, pickMesh, previewMesh, originalMesh, wellIndex, pointType, pointIndex, dataPos[3], guide}
-        const editPadMarkers = []; // {mesh, pickMesh, originalMesh, selectionMesh, ndsArrow, rotationControl, label, padIndex, wellIndex, padLabel, pointLabel, dataPos[3], visualPos[3], ndsAzimuthDeg, spacingM, color}
+        const editPadMarkers = []; // {mesh, pickMesh, originalMesh, selectionMesh, ndsArrow, rotationControl, guide, label, padIndex, wellIndex, padLabel, pointLabel, dataPos[3], visualPos[3], ndsAzimuthDeg, spacingM, color}
         const editReplanners = []; // FastReplan per well
         const editLineObjects = []; // THREE.LineSegments per well for preview
         const editLateralLabels = []; // midpoint label per well for current t1-t3 length
@@ -7541,10 +7473,21 @@
         let editPadRotateStartPoints = null;
         let editHasAnyChange = false;
         let editWarningDismissed = false;
+        let editCancelConfirmationPending = false;
         let selectedEditHandleIndex = null;
-        let editPadSummaryListKey = "";
         let editBroadcastChannel = null;
         let editSavePendingTimeoutId = null;
+        let pendingEditOperation = null;
+        let editSaveCanRetry = false;
+        let currentDatasetRevision = "";
+        let deferredDatasetUpdate = null;
+        const editDatasetNotice = document.createElement("div");
+        editDatasetNotice.id = "edit-dataset-notice";
+        editDatasetNotice.className = "edit-inspector-subtitle";
+        editDatasetNotice.setAttribute("role", "status");
+        editDatasetNotice.hidden = true;
+        editDatasetNotice.textContent = "Исходные данные обновлены. Старые правки сохранены в сцене. Нажмите «Отмена», чтобы перейти к новым данным.";
+        if (editToolbox) editToolbox.appendChild(editDatasetNotice);
         const EDIT_SAVE_DEFAULT_TEXT = "Сохранить изменения";
         const EDIT_SAVE_ACK_TIMEOUT_MS = 12000;
         const EDIT_DELTA_EPS_M = 0.005;
@@ -8466,12 +8409,10 @@
             return "Куст";
           }
           const padLabel = String(marker.padLabel || "").trim();
-          const roleLabel =
-            String(marker.pointLabel || "") === "Центр" ? "Центр" : "S";
           if (!padLabel) {
-            return `Куст · ${roleLabel}`;
+            return "Куст";
           }
-          return `Куст ${padLabel} · ${roleLabel}`;
+          return `Куст ${padLabel}`;
         }
 
         function syncEditPadHandleLabel(marker) {
@@ -8487,30 +8428,14 @@
           if (!selected) {
             return;
           }
-          const current = copyEditPoint(marker.dataPos || [0, 0, 0]);
-          const original = copyEditPoint(
-            editPadOriginalAnchors[marker.padIndex] || current,
-          );
-          const dx = Number(current[0]) - Number(original[0]);
-          const dy = Number(current[1]) - Number(original[1]);
-          const total = Math.hypot(dx, dy);
           const currentNds = normalizeAzimuthDeg(
             editPadCurrentNds[marker.padIndex] ?? marker.ndsAzimuthDeg,
           );
-          const originalNds = normalizeAzimuthDeg(
-            editPadOriginalNds[marker.padIndex] ?? currentNds,
-          );
-          const deltaNds = signedAzimuthDeltaDeg(currentNds, originalNds);
           marker.label.element.innerHTML =
             `<span class="edit-delta-head">${escapeHtml(editPadHandleLabelText(marker))}</span>` +
-            `<span class="edit-delta-row"><span>ΔX</span><span>${formatDeltaMeters(dx)}</span></span>` +
-            `<span class="edit-delta-row"><span>ΔY</span><span>${formatDeltaMeters(dy)}</span></span>` +
-            `<span class="edit-delta-row"><span>X</span><span>${formatCoordinateMeters(current[0])}</span></span>` +
-            `<span class="edit-delta-row"><span>Y</span><span>${formatCoordinateMeters(current[1])}</span></span>` +
-            `<span class="edit-delta-row"><span>НДС</span><span>${formatAzimuthDegrees(currentNds)}</span></span>` +
-            `<span class="edit-delta-row"><span>НДС₀</span><span>${formatAzimuthDegrees(originalNds)}</span></span>` +
-            `<span class="edit-delta-row"><span>ΔНДС</span><span>${formatDeltaDegrees(deltaNds)}</span></span>` +
-            `<span class="edit-delta-row edit-delta-total"><span>Итого</span><span>${formatDeltaMeters(total, false)}</span></span>`;
+            (editTransformMode === "rotate"
+              ? `<span class="edit-delta-row"><span>НДС</span><span>${formatAzimuthDegrees(currentNds)}</span></span>`
+              : "");
         }
 
         function updateEditPadMarkerPosition(marker, point) {
@@ -8583,72 +8508,21 @@
         }
 
         function syncEditPadSummary() {
-          if (
-            !editPadSummary ||
-            !editPadSummaryTitle ||
-            !editPadSummaryMode ||
-            !editPadDeltaX ||
-            !editPadDeltaY ||
-            !editPadFinalX ||
-            !editPadFinalY
-          ) {
+          if (!editPadSummary || !editPadSummaryTitle || !editPadSummaryMode) {
             return;
           }
           const padIndex = selectedEditPadIndex;
           const pad = selectedEditPad();
           if (!editModeActive || !pad || !isValidEditPadIndex(padIndex)) {
             editPadSummary.classList.remove("is-visible");
-            editPadSummaryListKey = "";
             return;
           }
-          const currentAnchor = editPadCurrentAnchors[padIndex] || [0, 0, 0];
-          const originalAnchor = editPadOriginalAnchors[padIndex] || [0, 0, 0];
           editPadSummaryTitle.textContent = String(
             pad.title || pad.label || pad.id || "Куст",
           );
-          editPadSummaryMode.textContent = String(pad.anchor_mode_label || "");
-          editPadDeltaX.textContent = formatDeltaMeters(
-            Number(currentAnchor[0]) - Number(originalAnchor[0]),
+          editPadSummaryMode.textContent = String(
+            pad.anchor_mode_label || "Положение площадки",
           );
-          editPadDeltaY.textContent = formatDeltaMeters(
-            Number(currentAnchor[1]) - Number(originalAnchor[1]),
-          );
-          editPadFinalX.textContent = formatCoordinateMeters(currentAnchor[0]);
-          editPadFinalY.textContent = formatCoordinateMeters(currentAnchor[1]);
-          if (editPadFinalNds) {
-            editPadFinalNds.textContent = formatAzimuthDegrees(editPadCurrentNds[padIndex]);
-          }
-          if (editPadWellList) {
-            const assignments = Array.isArray(pad.surface_points) ? pad.surface_points : [];
-            const currentPoints = editPadCurrentPoints[padIndex] || [];
-            const listKey = `${padIndex}|${currentPoints.map((point) => point.map((value) => Number(value).toFixed(3)).join(",")).join(";")}|${assignments.length}`;
-            if (listKey !== editPadSummaryListKey) {
-              editPadWellList.replaceChildren();
-              assignments.forEach((assignment, index) => {
-                const originalPoint = copyEditPoint(assignment.position);
-                const currentPoint = copyEditPoint(currentPoints[index] || originalPoint);
-                const row = document.createElement("button");
-                row.type = "button";
-                row.className = "edit-pad-well-row";
-                row.title = "Выбрать устье для отдельного редактирования";
-                const name = document.createElement("strong");
-                name.textContent = `#${Number(assignment.slot_index) || index + 1} ${String(assignment.well_name || "Скважина")}`;
-                const dx = document.createElement("span");
-                dx.textContent = formatDeltaMeters(currentPoint[0] - originalPoint[0]);
-                const dy = document.createElement("span");
-                dy.textContent = formatDeltaMeters(currentPoint[1] - originalPoint[1]);
-                row.append(name, dx, dy);
-                const wellIndex = editWellIndexByName.get(String(assignment.well_name || ""));
-                if (isValidEditWellIndex(wellIndex)) {
-                  row.addEventListener("click", () => selectEditWell(wellIndex, { focus: true }));
-                } else {
-                  row.disabled = true;
-                }
-                editPadWellList.appendChild(row);
-              });
-              editPadSummaryListKey = listKey;
-            }
-          }
           editPadSummary.classList.add("is-visible");
         }
 
@@ -8835,16 +8709,13 @@
         }
 
         function editPadNdsArrowLength(marker) {
-          const spacingM = Math.max(Number((marker && marker.spacingM) || 0), 1.0);
-          const wellCount = Math.max(
-            (editPadCurrentPoints[(marker && marker.padIndex) || -1] || []).length,
-            1,
-          );
-          return clampValue(spacingM * Math.max(wellCount * 1.35, 3.2), 48.0, 240.0);
+          // Screen-sized, like the target handle; independent of pad spacing,
+          // number of wells, zoom and the project's coordinate extent.
+          return worldUnitsPerPixelAt(marker.mesh.position) * 28.0;
         }
 
         function editPadRotationRadius(marker) {
-          return Math.max(editPadNdsArrowLength(marker) * 0.72, 36.0);
+          return worldUnitsPerPixelAt(marker.mesh.position) * 34.0;
         }
 
         function createEditPadNdsArrow(padIndex) {
@@ -8955,8 +8826,8 @@
           const arrowLength = editPadNdsArrowLength(marker);
           const centerDisplay = displayPoint(anchor);
           if (marker.ndsArrow && marker.ndsArrow.group) {
-            marker.ndsArrow.group.visible = selected;
-            if (selected) {
+            marker.ndsArrow.group.visible = selected && editTransformMode === "rotate";
+            if (selected && editTransformMode === "rotate") {
               const directionData = editPadNdsDirectionData(ndsDeg);
               const tipData = [
                 Number(anchor[0]) + directionData[0] * arrowLength,
@@ -8974,13 +8845,13 @@
                 direction,
               );
               const dragging = editPadRotateIndex === marker.padIndex;
+              // Only opacity uniforms change; keep material versions stable
+              // because this also runs while the camera updates handle sizes.
               if (marker.ndsArrow.shaft && marker.ndsArrow.shaft.material) {
                 marker.ndsArrow.shaft.material.opacity = dragging || rotateMode ? 1.0 : 0.82;
-                marker.ndsArrow.shaft.material.needsUpdate = true;
               }
               if (marker.ndsArrow.head && marker.ndsArrow.head.material) {
                 marker.ndsArrow.head.material.opacity = dragging || rotateMode ? 1.0 : 0.82;
-                marker.ndsArrow.head.material.needsUpdate = true;
               }
             }
           }
@@ -8993,7 +8864,6 @@
               const dragging = editPadRotateIndex === marker.padIndex;
               if (marker.rotationControl.ring && marker.rotationControl.ring.material) {
                 marker.rotationControl.ring.material.opacity = dragging ? 0.82 : 0.48;
-                marker.rotationControl.ring.material.needsUpdate = true;
               }
             }
           }
@@ -9072,8 +8942,8 @@
           element.addEventListener("pointercancel", endDrag);
         }
 
-        function createEditDeltaGuide(pointType, color) {
-          const label = addSceneLabel(
+        function createEditDeltaGuide(pointType, color, existingLabel = null) {
+          const label = existingLabel || addSceneLabel(
             "",
             new THREE.Vector3(0, 0, 0),
             color,
@@ -9081,7 +8951,7 @@
             { offsetX: 14, offsetY: 18, role: "edit_delta_label" },
           );
           label.visible = false;
-          initEditDeltaLabelDrag(label);
+          if (!existingLabel) initEditDeltaLabelDrag(label);
           return {
             pointType: pointType,
             lines: {
@@ -9212,8 +9082,59 @@
           }
         }
 
+        function updateEditPadDeltaGuide(marker) {
+          if (!marker) {
+            return;
+          }
+          const padIndex = marker.padIndex;
+          const original = editPadOriginalAnchors[padIndex];
+          const current = editPadCurrentAnchors[padIndex] || marker.dataPos;
+          if (!Array.isArray(original) || !Array.isArray(current)) {
+            hideEditDeltaGuide(marker.guide);
+            return;
+          }
+          const dx = Number(current[0]) - Number(original[0]);
+          const dy = Number(current[1]) - Number(original[1]);
+          const dz = Number(current[2]) - Number(original[2]);
+          const total = Math.hypot(dx, dy, dz);
+          const selected =
+            editModeActive &&
+            Number.isInteger(selectedEditPadIndex) &&
+            selectedEditPadIndex === padIndex &&
+            total > EDIT_DELTA_EPS_M;
+          if (!selected) {
+            hideEditDeltaGuide(marker.guide);
+            syncEditPadHandleLabel(marker);
+            return;
+          }
+          if (!marker.guide) {
+            marker.guide = createEditDeltaGuide(
+              editPadHandleLabelText(marker), EDIT_PAD_HANDLE_ACCENT, marker.label,
+            );
+          }
+          const guide = marker.guide;
+          const viaX = [current[0], original[1], original[2]];
+          const viaY = [current[0], current[1], original[2]];
+          updateDashedLineSegments(guide.lines.x, [[original, viaX]], Math.abs(dx) > EDIT_DELTA_EPS_M);
+          updateDashedLineSegments(guide.lines.y, [[viaX, viaY]], Math.abs(dy) > EDIT_DELTA_EPS_M);
+          updateDashedLineSegments(guide.lines.z, [[viaY, current]], Math.abs(dz) > EDIT_DELTA_EPS_M);
+          updateDashedLineSegments(guide.lines.total, [[original, current]], true);
+          guide.label.visible = true;
+          guide.label.position.copy(displayPoint(current));
+          guide.label.element.innerHTML =
+            `<span class="edit-delta-head">${escapeHtml(editPadHandleLabelText(marker))}</span>` +
+            `<span class="edit-delta-row"><span>ΔX</span><span>${formatDeltaMeters(dx)}</span></span>` +
+            `<span class="edit-delta-row"><span>ΔY</span><span>${formatDeltaMeters(dy)}</span></span>` +
+            `<span class="edit-delta-row"><span>ΔZ</span><span>${formatDeltaMeters(dz)}</span></span>` +
+            (editTransformMode === "rotate"
+              ? `<span class="edit-delta-row"><span>НДС</span><span>${formatAzimuthDegrees(editPadCurrentNds[padIndex])}</span></span>`
+              : "") +
+            `<span class="edit-delta-row edit-delta-total"><span>Итого</span><span>${formatDeltaMeters(total, false)}</span></span>`;
+        }
+
         function syncEditDeltaGuides() {
           editHandles.forEach(updateEditDeltaGuide);
+          editPadMarkers.forEach(updateEditPadDeltaGuide);
         }
 
         function horizontalT1T3Length(wellIndex) {
@@ -9751,6 +9672,7 @@
         }
 
         function applySidetrackFromInspector() {
+          if (isEditSavePending()) return;
           const handle = selectedEditHandle();
           const wellIndex = selectedEditWellIndex;
           const entry = editPointEntryForHandle(handle);
@@ -9828,7 +9750,7 @@
                 ? !Boolean(editPadDirtyFlags[selectedPad])
                 : !Boolean(editDirtyFlags[selectedIndex])
             );
-          editCancelBtn.disabled = !editModeActive || !editHasAnyChange;
+          editCancelBtn.disabled = !editModeActive;
           editPlaneSelector.querySelectorAll(".plane-btn").forEach((btn) => {
             btn.disabled =
               !editModeActive ||
@@ -9858,9 +9780,24 @@
           });
           syncEditPadSummary();
           syncEditInspector();
+          const pending = isEditSavePending();
+          editTargetsBtn.disabled = pending || Boolean(deferredDatasetUpdate);
+          if (editSidetrackMd) editSidetrackMd.disabled = pending;
+          if (editApplySidetrack) editApplySidetrack.disabled = pending;
+          if (pending) {
+            editToolbox.querySelectorAll("button").forEach((button) => {
+              button.disabled = true;
+            });
+          }
+          editDatasetNotice.hidden = !deferredDatasetUpdate;
+          if (deferredDatasetUpdate) {
+            editSaveBtn.disabled = true;
+            editSaveBtn.textContent = "Данные обновлены";
+          }
         }
 
         function undoSelectedEdit() {
+          if (isEditSavePending()) return;
           if (Number.isInteger(selectedEditPadIndex)) {
             const padIndex = selectedEditPadIndex;
             if (!Array.isArray(editPadUndoStacks[padIndex]) || editPadUndoStacks[padIndex].length === 0) {
@@ -9906,6 +9843,7 @@
         }
 
         function redoSelectedEdit() {
+          if (isEditSavePending()) return;
           if (Number.isInteger(selectedEditPadIndex)) {
             const padIndex = selectedEditPadIndex;
             if (!Array.isArray(editPadRedoStacks[padIndex]) || editPadRedoStacks[padIndex].length === 0) {
@@ -9951,6 +9889,7 @@
         }
 
         function resetSelectedEdit() {
+          if (isEditSavePending()) return;
           if (Number.isInteger(selectedEditPadIndex)) {
             const padIndex = selectedEditPadIndex;
             if (!editPadDirtyFlags[padIndex]) {
@@ -9995,34 +9934,53 @@
           }
         }
 
+        function resetEditCancelConfirmation() {
+          editCancelConfirmationPending = false;
+          editCancelBtn.textContent = "Отмена";
+          editCancelBtn.title = "Отменить все несохранённые изменения";
+          editCancelBtn.removeAttribute("aria-label");
+        }
+
         function cancelEditChanges() {
+          if (isEditSavePending()) return;
           if (!editModeActive) {
             return;
           }
-          if (
-            editHasAnyChange &&
-            !window.confirm("Отменить все несохранённые изменения?")
-          ) {
+          // Native confirm dialogs are blocked by the component iframe's
+          // sandbox. Confirm in-place without an additional modal or panel.
+          if (editHasAnyChange && !editCancelConfirmationPending) {
+            editCancelConfirmationPending = true;
+            editCancelBtn.textContent = "Точно?";
+            editCancelBtn.title = "Отменить все несохранённые изменения?";
+            editCancelBtn.setAttribute("aria-label", "Подтвердить отмену всех несохранённых изменений");
+            return;
+          }
+          resetEditCancelConfirmation();
+          if (deferredDatasetUpdate) {
+            const update = deferredDatasetUpdate;
+            const nextPayload = JSON.parse(update.payloadJson);
+            deferredDatasetUpdate = null;
+            currentDatasetRevision = update.context.datasetRevision;
+            applyViewerPayload(nextPayload, { preserveView: true });
+            payloadDigest = update.digest;
+            setEditMode(false);
+            update.context.onAccepted();
             return;
           }
           editDirtyFlags.forEach((isDirty, wellIndex) => {
-            if (!isDirty) {
-              return;
-            }
-            applyEditState(wellIndex, originalEditState(wellIndex));
+            if (isDirty) applyEditState(wellIndex, originalEditState(wellIndex));
             editUndoStacks[wellIndex] = [];
             editRedoStacks[wellIndex] = [];
           });
           editPadDirtyFlags.forEach((isDirty, padIndex) => {
-            if (!isDirty) {
-              return;
+            if (isDirty) {
+              applyEditPadState(
+                padIndex,
+                editPadOriginalAnchors[padIndex],
+                originalEditPadSurfacePoints(padIndex),
+                editPadOriginalNds[padIndex],
+              );
             }
-            applyEditPadState(
-              padIndex,
-              editPadOriginalAnchors[padIndex],
-              originalEditPadSurfacePoints(padIndex),
-              editPadOriginalNds[padIndex],
-            );
             editPadUndoStacks[padIndex] = [];
             editPadRedoStacks[padIndex] = [];
           });
@@ -10174,8 +10132,16 @@
         }
 
         function initEditPads() {
-          const markerGeometry = new THREE.SphereGeometry(1.0, 16, 12);
-          const selectionGeometry = new THREE.SphereGeometry(1.0, 12, 10);
+          // A small hexagonal puck reads as a pad/cluster while staying in the
+          // same visual scale as an editable well target.  The old NDS arrow
+          // was both oversized and ambiguous in move mode.
+          const markerGeometry = new THREE.CylinderGeometry(0.9, 0.9, 0.42, 6);
+          markerGeometry.rotateX(Math.PI * 0.5);
+          const selectionGeometry = new THREE.RingGeometry(0.90, 1.0, 6);
+          const dotGeometry = new THREE.CircleGeometry(0.16, 12);
+          const dotMaterial = new THREE.MeshBasicMaterial({
+            color: "#ffffff", transparent: true, depthTest: false, depthWrite: false,
+          });
           const pickGeometry = new THREE.SphereGeometry(1.0, 12, 10);
           const pickMaterial = new THREE.MeshBasicMaterial({
             color: "#ffffff",
@@ -10233,13 +10199,20 @@
             mesh.userData.lockViewerZGeometryScale = true;
             mesh.visible = false;
             mesh.renderOrder = 13;
+            // Three wellheads distinguish the pad from a single target point.
+            [[-0.30, -0.18], [0.30, -0.18], [0, 0.34]].forEach(([x, y]) => {
+              const dot = new THREE.Mesh(dotGeometry, dotMaterial);
+              dot.position.set(x, y, 0.24);
+              dot.renderOrder = 14;
+              mesh.add(dot);
+            });
             scene.add(mesh);
             const originalMesh = new THREE.Mesh(
-              markerGeometry,
+              selectionGeometry,
               new THREE.MeshBasicMaterial({
-                color: "#ffffff",
+                color: "#64748b",
                 transparent: true,
-                opacity: 0.88,
+                opacity: 0.82,
                 depthTest: false,
                 depthWrite: false,
               }),
@@ -10253,7 +10226,6 @@
               selectionGeometry,
               new THREE.MeshBasicMaterial({
                 color: "#ffffff",
-                wireframe: true,
                 transparent: true,
                 opacity: 0.98,
                 depthTest: false,
@@ -10293,6 +10265,7 @@
               selectionMesh: selectionMesh,
               ndsArrow: ndsArrow,
               rotationControl: rotationControl,
+              guide: null,
               label: label,
               padIndex: padIndex,
               pointIndex: null,
@@ -10387,8 +10360,11 @@
               ? marker.mesh.position
               : displayPoint(marker.dataPos);
             if (marker.mesh) {
+              // Face the camera so the small pad glyph never becomes an
+              // unreadable edge-on sliver when orbiting near the XY plane.
+              marker.mesh.quaternion.copy(camera.quaternion);
               marker.mesh.scale.setScalar(
-                editHandleScale(displayPosition, selectedPad ? 16.0 : 12.0),
+                editHandleScale(displayPosition, selectedPad ? 20.0 : 14.0),
               );
             }
             if (marker.pickMesh) {
@@ -10397,19 +10373,32 @@
               );
             }
             if (marker.originalMesh) {
+              marker.originalMesh.quaternion.copy(camera.quaternion);
               marker.originalMesh.scale.setScalar(
-                editHandleScale(marker.originalMesh.position, 11.0),
+                editHandleScale(marker.originalMesh.position, 18.0),
               );
             }
             if (marker.selectionMesh) {
+              marker.selectionMesh.quaternion.copy(camera.quaternion);
               marker.selectionMesh.scale.setScalar(
-                editHandleScale(displayPosition, selectedPad ? 22.0 : 14.0),
+                editHandleScale(displayPosition, selectedPad ? 22.0 : 16.0),
               );
             }
+            if (selectedPad) updateEditPadNdsVisuals(marker);
           });
         }
 
+        function isEditSavePending() {
+          return pendingEditOperation !== null;
+        }
+
         function resetEditSaveButtonState() {
+          if (isEditSavePending()) return;
+          if (deferredDatasetUpdate) {
+            editSaveBtn.disabled = true;
+            editSaveBtn.textContent = "Данные обновлены";
+            return;
+          }
           if (!editSaveBtn) {
             return;
           }
@@ -10435,6 +10424,7 @@
           editSaveBtn.classList.remove("is-pending");
           editSaveBtn.classList.add("is-error");
           editSaveBtn.textContent = String(message || "Не удалось применить");
+          syncEditToolboxState();
         }
 
         function initEditToolboxDrag() {
@@ -10491,6 +10481,7 @@
         }
 
         function syncEditVisibility() {
+          resetEditCancelConfirmation();
           syncSelectedEditHandle();
           const selectedPadIndex = isValidEditPadIndex(selectedEditPadIndex)
             ? selectedEditPadIndex
@@ -10623,6 +10614,8 @@
         }
 
         function setEditMode(active) {
+          if (isEditSavePending()) return;
+          if (deferredDatasetUpdate) return;
           editModeActive = active;
           editTargetsBtn.classList.toggle("is-active", active);
           editToolbox.classList.toggle("is-visible", active);
@@ -10651,6 +10644,7 @@
         }
 
         function setEditPlane(plane) {
+          if (isEditSavePending()) return;
           if (plane !== "xy" && plane !== "z") {
             return;
           }
@@ -10662,6 +10656,7 @@
         }
 
         function setEditMoveScope(scope) {
+          if (isEditSavePending()) return;
           const validScopes = new Set(["point", "well", "after"]);
           if (!validScopes.has(String(scope || ""))) {
             return;
@@ -10677,6 +10672,7 @@
         }
 
         function setEditTransformMode(operation) {
+          if (isEditSavePending()) return;
           if (operation !== "move" && operation !== "rotate") {
             return;
           }
@@ -10700,8 +10696,7 @@
           editOperationSelector.querySelectorAll(".operation-btn").forEach((btn) => {
             btn.classList.toggle("is-active", btn.dataset.operation === operation);
           });
-          syncEditRotationControls();
-          syncEditToolboxState();
+          syncEditVisibility();
           requestRender();
         }
 
@@ -11021,6 +11016,7 @@
         }
 
         function onEditKeyDown(event) {
+          if (isEditSavePending()) return;
           if (Number.isInteger(selectedEditPadIndex)) {
             return;
           }
@@ -11527,6 +11523,7 @@
         }
 
         function startMiniMapEditDrag(event) {
+          if (isEditSavePending()) return false;
           const handle = miniMapEditableHandleAtEvent(event);
           if (!handle) {
             return false;
@@ -11564,6 +11561,7 @@
         }
 
         function onEditPointerDown(event) {
+          if (isEditSavePending()) return;
           if (!editModeActive) return;
           if (isPointerInMiniMap(event)) return;
           const rect = renderer.domElement.getBoundingClientRect();
@@ -11964,7 +11962,7 @@
           requestRender();
         }
 
-        function sendEditTargetsToStreamlit(changes, padChanges) {
+        function sendEditTargetsToStreamlit(operation) {
           if (!editChannelName || typeof BroadcastChannel === "undefined") {
             return false;
           }
@@ -11972,12 +11970,7 @@
             if (!editBroadcastChannel) {
               editBroadcastChannel = new BroadcastChannel(editChannelName);
             }
-            editBroadcastChannel.postMessage({
-              type: "pywp:editTargets",
-              changes: Array.isArray(changes) ? changes : [],
-              pad_changes: Array.isArray(padChanges) ? padChanges : [],
-              nonce: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-            });
+            editBroadcastChannel.postMessage(operation);
             return true;
           } catch (e) {
             return false;
@@ -11985,6 +11978,11 @@
         }
 
         function onEditSave() {
+          if (deferredDatasetUpdate) return;
+          if (isEditSavePending()) {
+            if (editSaveCanRetry) transmitPendingEditOperation();
+            return;
+          }
           // Collect changes
           const changes = [];
           const padChanges = [];
@@ -12092,14 +12090,39 @@
             });
           });
           if (changes.length === 0 && padChanges.length === 0) return;
-          // Visual feedback
+          pendingEditOperation = {
+            type: "pywp:editTargets",
+            changes: changes,
+            pad_changes: padChanges,
+            nonce: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+            delivery_attempt: 0,
+            dataset_revision: currentDatasetRevision,
+          };
+          transmitPendingEditOperation();
+        }
+
+        function transmitPendingEditOperation() {
+          if (!pendingEditOperation) return;
+          const previouslySent = pendingEditOperation.delivery_attempt > 0;
+          // A transport retry changes the component value, but not the operation
+          // identity or its immutable submitted coordinates.
+          pendingEditOperation.delivery_attempt += 1;
+          editSaveCanRetry = false;
           editSaveBtn.disabled = true;
           editSaveBtn.textContent = "Применяем...";
+          editSaveBtn.classList.remove("is-error");
           editSaveBtn.classList.add("is-pending");
-          if (!sendEditTargetsToStreamlit(changes, padChanges)) {
+          resetEditCancelConfirmation();
+          syncEditToolboxState();
+          if (!sendEditTargetsToStreamlit(pendingEditOperation)) {
+            if (!previouslySent) pendingEditOperation = null;
+            editSaveCanRetry = previouslySent;
             showEditSaveError("Не удалось применить");
           } else {
             editSavePendingTimeoutId = setTimeout(() => {
+              // Timeout is an unknown outcome, not rejection. Keep editing
+              // locked until this operation is explicitly acknowledged.
+              editSaveCanRetry = true;
               showEditSaveError("Нет подтверждения — повторить");
             }, EDIT_SAVE_ACK_TIMEOUT_MS);
           }
@@ -12240,10 +12263,9 @@
           selectedEditWellIndices = new Set();
           editLegendSelectionAnchorIndex = null;
 
-          const rawPadIndex = context.selectedPadId
+          const padIndex = context.selectedPadId
             ? editPadIndexById.get(String(context.selectedPadId))
             : null;
-          const padIndex = Number(rawPadIndex);
           if (isValidEditPadIndex(padIndex)) {
             selectedEditPadIndex = padIndex;
             selectedEditHandleIndex = null;
@@ -12301,10 +12323,10 @@
           syncSelectedEditHandle();
           if (
             context.transformMode === "rotate" &&
-            selectedEditPadIndex === null &&
-            Number.isInteger(selectedEditWellIndex) &&
-            selectedEditWellIndices.size <= 1 &&
-            editWellSupportsRotation(selectedEditWellIndex)
+            (isValidEditPadIndex(selectedEditPadIndex) ||
+              (Number.isInteger(selectedEditWellIndex) &&
+                selectedEditWellIndices.size <= 1 &&
+                editWellSupportsRotation(selectedEditWellIndex)))
           ) {
             editTransformMode = "rotate";
           }
@@ -12420,7 +12442,10 @@
           editPadOriginalNds.length = 0;
           editPadCurrentNds.length = 0;
           editPadDirtyFlags.length = 0;
-          editPadSummaryListKey = "";
+          editPadUndoStacks.length = 0;
+          editPadRedoStacks.length = 0;
+          editPadDragHistoryStartState = null;
+          editPadRotateHistoryStartState = null;
           editOriginalPoints.length = 0;
           editCurrentPoints.length = 0;
           editOriginalT1.length = 0;
@@ -12647,6 +12672,10 @@
           editRedoBtn.addEventListener("click", redoSelectedEdit);
           editResetBtn.addEventListener("click", resetSelectedEdit);
           editCancelBtn.addEventListener("click", cancelEditChanges);
+          editCancelBtn.addEventListener("blur", resetEditCancelConfirmation);
+          editCancelBtn.addEventListener("keydown", (event) => {
+            if (event.key === "Escape") resetEditCancelConfirmation();
+          });
           editSaveBtn.addEventListener("click", onEditSave);
           if (editApplySidetrack) {
             editApplySidetrack.addEventListener("click", applySidetrackFromInspector);
@@ -12669,20 +12698,60 @@
         syncLegendVisibility();
         renderCollisions();
         startAnimationLoop();
-        window.__PYWP_VIEWER_UPDATE__ = function (nextPayloadJson, nextPayloadDigest) {
+        window.__PYWP_VIEWER_SET_DATASET_REVISION__ = function (revision) {
+          currentDatasetRevision = String(revision || "");
+        };
+        window.__PYWP_VIEWER_UPDATE__ = function (nextPayloadJson, nextPayloadDigest, editAck, context = {}) {
+          const nextRevision = String(context.datasetRevision || "");
+          const datasetChanged = nextRevision !== currentDatasetRevision;
+          const matchingAck = isEditSavePending() && editAck &&
+            editAck.nonce === pendingEditOperation.nonce &&
+            ["applied", "noop", "error", "conflict"].includes(editAck.status);
+          if ((datasetChanged || (matchingAck && editAck.status === "conflict")) &&
+              (editHasAnyChange || isEditSavePending() || deferredDatasetUpdate)) {
+            deferredDatasetUpdate = {
+              payloadJson: String(nextPayloadJson || "{}"),
+              digest: String(nextPayloadDigest || ""),
+              context: { datasetRevision: nextRevision, onAccepted: context.onAccepted || (() => {}) },
+            };
+            pendingEditOperation = null;
+            editSaveCanRetry = false;
+            showEditSaveError("Данные обновлены");
+            return false;
+          }
+          if (deferredDatasetUpdate) return false;
+          if (isEditSavePending() && !matchingAck) return false;
+          if (matchingAck && editAck.status === "error") {
+            pendingEditOperation = null;
+            editSaveCanRetry = false;
+            showEditSaveError("Изменения не применены — повторить");
+            return false;
+          }
+          // Unrelated host renders and old acknowledgements must not overwrite
+          // a local draft. Overlay-only updates have a separate safe path.
+          if (!matchingAck && editModeActive && editHasAnyChange) return false;
           const resolvedDigest = String(nextPayloadDigest || "");
-          if (resolvedDigest && resolvedDigest === payloadDigest) {
+          if (!datasetChanged && !matchingAck && resolvedDigest && resolvedDigest === payloadDigest) {
             return true;
           }
           const nextPayload = JSON.parse(String(nextPayloadJson || "{}"));
+          pendingEditOperation = null;
+          editSaveCanRetry = false;
+          currentDatasetRevision = nextRevision;
           applyViewerPayload(nextPayload, { preserveView: true });
           payloadDigest = resolvedDigest;
           return true;
         };
         window.__PYWP_VIEWER_APPLY_ANTICOLLISION_OVERLAY__ = function (
           nextPayloadJson,
-          nextPayloadDigest
+          nextPayloadDigest,
+          editAck,
+          context = {}
         ) {
+          if (isEditSavePending() || deferredDatasetUpdate ||
+              String(context.datasetRevision || "") !== currentDatasetRevision) {
+            return window.__PYWP_VIEWER_UPDATE__(nextPayloadJson, nextPayloadDigest, editAck, context);
+          }
           const resolvedDigest = String(nextPayloadDigest || "");
           if (resolvedDigest && resolvedDigest === payloadDigest) {
             return true;

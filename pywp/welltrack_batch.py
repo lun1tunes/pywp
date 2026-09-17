@@ -48,7 +48,7 @@ from pywp.models import (
     TrajectoryConfig,
 )
 from pywp.multi_horizontal import extend_plan_with_multi_horizontal_targets
-from pywp.parallel import process_pool_context
+from pywp.parallel import calculation_budgeted, process_pool_context
 from pywp.pilot_wells import (
     PilotBuildResult,
     PilotWindow,
@@ -1070,6 +1070,7 @@ class WelltrackBatchPlanner:
     def last_evaluation_metadata(self) -> BatchEvaluationMetadata:
         return self._last_evaluation_metadata
 
+    @calculation_budgeted
     def evaluate(
         self,
         records: Iterable[WelltrackRecord],

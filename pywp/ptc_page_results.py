@@ -33,6 +33,7 @@ from pywp.pilot_wells import (
     pilot_name_key_for_record,
     well_name_key,
 )
+from pywp.ui_well_panels import survey_source_coordinates
 from pywp.ui_well_result import (
     SingleWellResultView,
     render_key_metrics,
@@ -1550,7 +1551,7 @@ def render_success_tabs(
             pilot_kop_md_m=pilot_kop_md_m,
             sidetrack_window_point=sidetrack_window_point,
         )
-        survey_export_stations = None
+        survey_export_stations = survey_source_coordinates(selected.stations)
         survey_export_xy_label_suffix = ""
         survey_export_xy_unit = "м"
         survey_export_azi_true_deg = None
@@ -1566,7 +1567,7 @@ def render_success_tabs(
             and survey_export_crs == selected_crs
         ):
             survey_export_stations = transform_stations_to_crs(
-                selected.stations,
+                survey_export_stations,
                 selected_crs,
                 input_crs,
                 rename_columns=False,
@@ -1580,11 +1581,7 @@ def render_success_tabs(
             survey_export_azi_true_deg, survey_export_azi_grid_deg = (
                 ptc_batch_results.survey_export_azimuth_columns(
                     source_stations=selected.stations,
-                    export_stations=(
-                        survey_export_stations
-                        if survey_export_stations is not None
-                        else selected.stations
-                    ),
+                    export_stations=survey_export_stations,
                     source_crs=input_crs,
                     export_crs=survey_export_crs,
                 )

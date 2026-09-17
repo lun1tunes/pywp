@@ -176,30 +176,29 @@
           const nextPayloadDigest = String(nextArgs.payload_digest || "");
           const nextRuntimeDigest = String(nextArgs.runtime_digest || "");
           const payloadJson = String(nextArgs.payload_json || "{}");
+          const editAck = nextArgs.edit_ack || null;
           const nextHasAntiCollisionPayload = Boolean(
             nextArgs.has_anticollision_payload,
           );
           const instanceToken = Number(nextArgs.instance_token) || 0;
           renderGeneration += 1;
           const generation = renderGeneration;
-          bindChannel(nextArgs.channel || "");
+          const updateContext = {
+            datasetRevision: String(nextArgs.dataset_revision || ""),
+            onAccepted: function () {
+              bindChannel(nextArgs.channel || "");
+              currentPayloadDigest = nextPayloadDigest;
+              currentHasAntiCollisionPayload = nextHasAntiCollisionPayload;
+              setStatus("", false);
+            },
+          };
           frame.style.height = nextHeight + "px";
           post(SET_HEIGHT, { height: nextHeight });
-          if (
-            frame.srcdoc &&
-            nextPayloadDigest &&
-            nextPayloadDigest === currentPayloadDigest &&
-            nextRuntimeDigest === currentRuntimeDigest
-          ) {
-            setStatus("", false);
-            return;
-          }
           if (
             frameLoaded &&
             frame.srcdoc &&
             nextRuntimeDigest === currentRuntimeDigest &&
-            nextPayloadDigest &&
-            nextPayloadDigest !== currentPayloadDigest
+            nextPayloadDigest
           ) {
             setStatus("Обновление 3D...", false);
             window.requestAnimationFrame(function () {
@@ -214,10 +213,14 @@
                   nextHasAntiCollisionPayload &&
                   typeof frameWindow.__PYWP_VIEWER_APPLY_ANTICOLLISION_OVERLAY__ === "function"
                 ) {
-                  frameWindow.__PYWP_VIEWER_APPLY_ANTICOLLISION_OVERLAY__(
+                  const accepted = frameWindow.__PYWP_VIEWER_APPLY_ANTICOLLISION_OVERLAY__(
                     payloadJson,
                     nextPayloadDigest,
+                    editAck,
+                    updateContext,
                   );
+                  if (accepted === false) { setStatus("", false); return; }
+                  bindChannel(nextArgs.channel || "");
                   currentPayloadDigest = nextPayloadDigest;
                   currentHasAntiCollisionPayload = true;
                   setStatus("", false);
@@ -228,7 +231,9 @@
                   frameWindow &&
                   typeof frameWindow.__PYWP_VIEWER_UPDATE__ === "function"
                 ) {
-                  frameWindow.__PYWP_VIEWER_UPDATE__(payloadJson, nextPayloadDigest);
+                  const accepted = frameWindow.__PYWP_VIEWER_UPDATE__(payloadJson, nextPayloadDigest, editAck, updateContext);
+                  if (accepted === false) { setStatus("", false); return; }
+                  bindChannel(nextArgs.channel || "");
                   currentPayloadDigest = nextPayloadDigest;
                   currentHasAntiCollisionPayload = nextHasAntiCollisionPayload;
                   setStatus("", false);
@@ -236,7 +241,9 @@
                   return;
                 }
               } catch (_error) {
-                currentPayloadDigest = "";
+                // Do not reload the iframe and destroy a draft on update errors.
+                setStatus("Не удалось обновить 3D.", true);
+                return;
               }
               currentPayloadDigest = "";
               currentRuntimeDigest = "";
@@ -261,12 +268,14 @@
                 return;
               }
               frameLoaded = true;
+              frame.contentWindow.__PYWP_VIEWER_SET_DATASET_REVISION__(updateContext.datasetRevision);
               currentHasAntiCollisionPayload = nextHasAntiCollisionPayload;
               setStatus("", false);
               post(SET_HEIGHT, { height: nextHeight });
             };
             frameLoaded = false;
             currentPayloadDigest = nextPayloadDigest;
+            bindChannel(nextArgs.channel || "");
             frame.srcdoc = sceneHtml;
           } catch (error) {
             currentPayloadDigest = "";

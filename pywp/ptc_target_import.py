@@ -4,6 +4,7 @@ from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 import re
+from uuid import uuid4
 
 import numpy as np
 import pandas as pd
@@ -453,6 +454,7 @@ def store_imported_records(
 ) -> TargetImportStoreResult:
     """Store parsed target records and run import-time pad auto-layout."""
 
+    session_state["wt_target_dataset_revision"] = uuid4().hex
     normalized_records = list(records)
     well_names = tuple(str(record.name) for record in normalized_records)
     session_state["wt_records"] = list(normalized_records)
@@ -501,6 +503,7 @@ def reset_failed_import_state(
 ) -> None:
     """Reset target records after a failed parse without touching old results."""
 
+    session_state["wt_target_dataset_revision"] = uuid4().hex
     session_state["wt_records"] = None
     session_state["wt_records_original"] = None
     session_state["wt_target_import_source_kind"] = ""
@@ -540,6 +543,7 @@ def clear_target_import_flow_state(
 ) -> None:
     """Clear imported targets, reference wells, selection, and result state."""
 
+    session_state["wt_target_dataset_revision"] = uuid4().hex
     session_state["wt_records"] = None
     session_state["wt_records_original"] = None
     session_state["wt_target_import_source_kind"] = ""
