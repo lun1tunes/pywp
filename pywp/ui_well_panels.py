@@ -116,6 +116,61 @@ def survey_export_csv_bytes(export_df: pd.DataFrame) -> bytes:
     return export_df.to_csv(index=False, sep=",").encode("utf-8-sig")
 
 
+def survey_excel_coordinate_columns(
+    export_df: pd.DataFrame,
+    *,
+    source_xy_label_suffix: str,
+    output_xy_label_suffix: str,
+    output_xy_unit: str = "м",
+    include_output_xy: bool = False,
+) -> pd.DataFrame:
+    """Label Excel coordinates like target exports, in source X/Y then output X/Y order.
+
+    E/N here are the source-CRS values prepared before transformation, not
+    the output X/Y. Preserve the application's X=East, Y=North convention.
+    The input frame has already passed through survey_export_dataframe.
+    """
+    if not {"E_m", "N_m"}.issubset(export_df.columns):
+        raise ValueError("Исходные координаты X/Y не подготовлены для выгрузки Excel.")
+    source_label = _csv_crs_label(source_xy_label_suffix)
+    if not source_label:
+        raise ValueError("Для выгрузки Excel не задана исходная система координат.")
+    source_x, source_y = f"X_{source_label}_m", f"Y_{source_label}_m"
+    output_label = _csv_crs_label(output_xy_label_suffix)
+    output_unit = _csv_unit_label(output_xy_unit)
+    output_suffix = (
+        f"_{output_label}_{output_unit}" if output_label else f"_{output_unit}"
+    )
+    output_x, output_y = f"X{output_suffix}", f"Y{output_suffix}"
+    if include_output_xy and (source_x, source_y) == (output_x, output_y):
+        raise ValueError("Названия исходной и выходной СК в выгрузке Excel совпадают.")
+    # Legacy formatting callbacks may leave X_m/Y_m unrenamed.
+    x_values = output_x if output_x in export_df else "X_m"
+    y_values = output_y if output_y in export_df else "Y_m"
+    if include_output_xy and (
+        not output_label or not {x_values, y_values}.issubset(export_df.columns)
+    ):
+        raise ValueError("Выходные координаты X/Y или их СК не заданы для Excel.")
+
+    # Both regular and transformed exports contain an output X/Y pair. Replace
+    # its whole coordinate block, not N/E in place (which may be ordered N/E).
+    coordinate_columns = {"N_m", "E_m", "X_m", "Y_m", output_x, output_y}
+    columns = list(export_df.columns)
+    first_coordinate = next(
+        i for i, name in enumerate(columns) if name in coordinate_columns
+    )
+    result = export_df.drop(columns=list(coordinate_columns), errors="ignore")
+    insert_at = sum(
+        name not in coordinate_columns for name in columns[:first_coordinate]
+    )
+    result.insert(insert_at, source_x, export_df["E_m"])
+    result.insert(insert_at + 1, source_y, export_df["N_m"])
+    if include_output_xy:
+        result.insert(insert_at + 2, output_x, export_df[x_values])
+        result.insert(insert_at + 3, output_y, export_df[y_values])
+    return result
+
+
 def survey_export_excel_bytes(
     export_df: pd.DataFrame,
     *,
@@ -323,6 +378,8 @@ def render_survey_table_with_download(
     xy_unit: str = "м",
     export_xy_label_suffix: str | None = None,
     export_xy_unit: str | None = None,
+    excel_source_xy_label_suffix: str | None = None,
+    excel_include_output_xy: bool = False,
     export_azi_true_deg: object | None = None,
     export_azi_grid_deg: object | None = None,
 ) -> None:
@@ -376,6 +433,19 @@ def render_survey_table_with_download(
         azi_true_deg=export_azi_true_deg,
         azi_grid_deg=export_azi_grid_deg,
     )
+    excel_payload = export_payload
+    if excel_source_xy_label_suffix is not None:
+        excel_payload = survey_excel_coordinate_columns(
+            export_payload,
+            source_xy_label_suffix=excel_source_xy_label_suffix,
+            output_xy_label_suffix=(
+                xy_label_suffix
+                if export_xy_label_suffix is None
+                else export_xy_label_suffix
+            ),
+            output_xy_unit=xy_unit if export_xy_unit is None else export_xy_unit,
+            include_output_xy=excel_include_output_xy,
+        )
     excel_file_name = str(Path(file_name).with_suffix(".xlsx").name)
     csv_col, excel_col = st.columns(2, gap="small")
     with csv_col:
@@ -390,7 +460,7 @@ def render_survey_table_with_download(
     with excel_col:
         st.download_button(
             "Скачать Excel инклинометрии",
-            data=survey_export_excel_bytes(export_payload, sheet_name="survey"),
+            data=survey_export_excel_bytes(excel_payload, sheet_name="survey"),
             file_name=excel_file_name,
             mime=(
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"

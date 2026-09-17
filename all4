@@ -1083,7 +1083,7 @@ def format_run_log_line(run_started_s: float, message: str) -> str:
     return f"[{timestamp}] elapsed={elapsed_s:.2f}s | {message}"
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ui_well_panels.py	13357
+===BEGIN_FILE===	pywp/ui_well_panels.py	16632
 from __future__ import annotations
 
 from collections.abc import Sequence
@@ -1200,6 +1200,61 @@ def survey_export_dataframe(
 
 def survey_export_csv_bytes(export_df: pd.DataFrame) -> bytes:
     return export_df.to_csv(index=False, sep=",").encode("utf-8-sig")
+
+
+def survey_excel_coordinate_columns(
+    export_df: pd.DataFrame,
+    *,
+    source_xy_label_suffix: str,
+    output_xy_label_suffix: str,
+    output_xy_unit: str = "м",
+    include_output_xy: bool = False,
+) -> pd.DataFrame:
+    """Label Excel coordinates like target exports, in source X/Y then output X/Y order.
+
+    E/N here are the source-CRS values prepared before transformation, not
+    the output X/Y. Preserve the application's X=East, Y=North convention.
+    The input frame has already passed through survey_export_dataframe.
+    """
+    if not {"E_m", "N_m"}.issubset(export_df.columns):
+        raise ValueError("Исходные координаты X/Y не подготовлены для выгрузки Excel.")
+    source_label = _csv_crs_label(source_xy_label_suffix)
+    if not source_label:
+        raise ValueError("Для выгрузки Excel не задана исходная система координат.")
+    source_x, source_y = f"X_{source_label}_m", f"Y_{source_label}_m"
+    output_label = _csv_crs_label(output_xy_label_suffix)
+    output_unit = _csv_unit_label(output_xy_unit)
+    output_suffix = (
+        f"_{output_label}_{output_unit}" if output_label else f"_{output_unit}"
+    )
+    output_x, output_y = f"X{output_suffix}", f"Y{output_suffix}"
+    if include_output_xy and (source_x, source_y) == (output_x, output_y):
+        raise ValueError("Названия исходной и выходной СК в выгрузке Excel совпадают.")
+    # Legacy formatting callbacks may leave X_m/Y_m unrenamed.
+    x_values = output_x if output_x in export_df else "X_m"
+    y_values = output_y if output_y in export_df else "Y_m"
+    if include_output_xy and (
+        not output_label or not {x_values, y_values}.issubset(export_df.columns)
+    ):
+        raise ValueError("Выходные координаты X/Y или их СК не заданы для Excel.")
+
+    # Both regular and transformed exports contain an output X/Y pair. Replace
+    # its whole coordinate block, not N/E in place (which may be ordered N/E).
+    coordinate_columns = {"N_m", "E_m", "X_m", "Y_m", output_x, output_y}
+    columns = list(export_df.columns)
+    first_coordinate = next(
+        i for i, name in enumerate(columns) if name in coordinate_columns
+    )
+    result = export_df.drop(columns=list(coordinate_columns), errors="ignore")
+    insert_at = sum(
+        name not in coordinate_columns for name in columns[:first_coordinate]
+    )
+    result.insert(insert_at, source_x, export_df["E_m"])
+    result.insert(insert_at + 1, source_y, export_df["N_m"])
+    if include_output_xy:
+        result.insert(insert_at + 2, output_x, export_df[x_values])
+        result.insert(insert_at + 3, output_y, export_df[y_values])
+    return result
 
 
 def survey_export_excel_bytes(
@@ -1409,6 +1464,8 @@ def render_survey_table_with_download(
     xy_unit: str = "м",
     export_xy_label_suffix: str | None = None,
     export_xy_unit: str | None = None,
+    excel_source_xy_label_suffix: str | None = None,
+    excel_include_output_xy: bool = False,
     export_azi_true_deg: object | None = None,
     export_azi_grid_deg: object | None = None,
 ) -> None:
@@ -1462,6 +1519,19 @@ def render_survey_table_with_download(
         azi_true_deg=export_azi_true_deg,
         azi_grid_deg=export_azi_grid_deg,
     )
+    excel_payload = export_payload
+    if excel_source_xy_label_suffix is not None:
+        excel_payload = survey_excel_coordinate_columns(
+            export_payload,
+            source_xy_label_suffix=excel_source_xy_label_suffix,
+            output_xy_label_suffix=(
+                xy_label_suffix
+                if export_xy_label_suffix is None
+                else export_xy_label_suffix
+            ),
+            output_xy_unit=xy_unit if export_xy_unit is None else export_xy_unit,
+            include_output_xy=excel_include_output_xy,
+        )
     excel_file_name = str(Path(file_name).with_suffix(".xlsx").name)
     csv_col, excel_col = st.columns(2, gap="small")
     with csv_col:
@@ -1476,7 +1546,7 @@ def render_survey_table_with_download(
     with excel_col:
         st.download_button(
             "Скачать Excel инклинометрии",
-            data=survey_export_excel_bytes(export_payload, sheet_name="survey"),
+            data=survey_export_excel_bytes(excel_payload, sheet_name="survey"),
             file_name=excel_file_name,
             mime=(
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -1486,7 +1556,7 @@ def render_survey_table_with_download(
         )
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ui_well_result.py	25923
+===BEGIN_FILE===	pywp/ui_well_result.py	26179
 from __future__ import annotations
 
 import math
@@ -2111,6 +2181,8 @@ def render_result_tables(
     survey_export_stations: pd.DataFrame | None = None,
     survey_export_xy_label_suffix: str = "",
     survey_export_xy_unit: str = "м",
+    survey_excel_source_xy_label_suffix: str | None = None,
+    survey_excel_include_output_xy: bool = False,
     survey_export_azi_true_deg: object | None = None,
     survey_export_azi_grid_deg: object | None = None,
     show_validation_section: bool = True,
@@ -2215,6 +2287,8 @@ def render_result_tables(
                 survey_export_xy_label_suffix or fallback_xy_label_suffix
             ),
             export_xy_unit=survey_export_xy_unit or fallback_xy_unit,
+            excel_source_xy_label_suffix=survey_excel_source_xy_label_suffix,
+            excel_include_output_xy=survey_excel_include_output_xy,
             export_azi_true_deg=survey_export_azi_true_deg,
             export_azi_grid_deg=survey_export_azi_grid_deg,
         )
@@ -10310,138 +10384,3 @@ def _plan_translated_wells(
     *,
     prefix: str,
     count: int,
-    global_x_offset_m: float = 0.0,
-    global_y_offset_m: float = 0.0,
-) -> list[tuple[str, pd.DataFrame]]:
-    base_records = parse_welltrack_text(BASE_SOURCE.read_text(encoding="utf-8"))
-    templates = [welltrack_points_to_targets(record.points) for record in base_records]
-    offsets = _centered_grid_offsets(
-        count=count,
-        columns=GRID_COLUMNS,
-        global_x_offset_m=global_x_offset_m,
-        global_y_offset_m=global_y_offset_m,
-    )
-    planner = TrajectoryPlanner()
-    config = _stress_config()
-    planned: list[tuple[str, pd.DataFrame]] = []
-    for index in range(count):
-        surface, t1, t3 = templates[index % len(templates)]
-        dx_m, dy_m = offsets[index]
-        shifted_surface, shifted_t1, shifted_t3 = _translate_targets(
-            surface,
-            t1,
-            t3,
-            dx_m,
-            dy_m,
-        )
-        result = planner.plan(
-            surface=shifted_surface,
-            t1=shifted_t1,
-            t3=shifted_t3,
-            config=config,
-        )
-        planned.append((f"{prefix}_{index + 1:03d}", result.stations.copy()))
-    return planned
-
-
-def _format_welltrack_text(wells: list[tuple[str, pd.DataFrame]]) -> str:
-    blocks: list[str] = []
-    for well_name, stations in wells:
-        lines = [f"WELLTRACK '{well_name}'"]
-        for row in stations[["X_m", "Y_m", "Z_m", "MD_m"]].itertuples(index=False):
-            lines.append(
-                f"{float(row.X_m):.3f} {float(row.Y_m):.3f} "
-                f"{float(row.Z_m):.3f} {float(row.MD_m):.3f}"
-            )
-        lines.append("/")
-        blocks.append("\n".join(lines))
-    return "\n\n".join(blocks) + "\n"
-
-
-def generate_stress_welltracks(
-    *,
-    fact_target: Path,
-    project_target: Path,
-) -> None:
-    fact_wells = _plan_translated_wells(prefix="FACT", count=FACT_COUNT)
-    project_wells = _plan_translated_wells(
-        prefix="PROJECT",
-        count=PROJECT_COUNT,
-        global_x_offset_m=PROJECT_GLOBAL_OFFSET_X_M,
-        global_y_offset_m=PROJECT_GLOBAL_OFFSET_Y_M,
-    )
-    fact_target.write_text(_format_welltrack_text(fact_wells), encoding="utf-8")
-    project_target.write_text(_format_welltrack_text(project_wells), encoding="utf-8")
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Generate large reference WELLTRACK datasets for custom 3D "
-            "performance testing."
-        )
-    )
-    parser.add_argument(
-        "--fact-target",
-        type=Path,
-        default=DEFAULT_FACT_TARGET,
-        help=f"Output path for factual trajectories (default: {DEFAULT_FACT_TARGET})",
-    )
-    parser.add_argument(
-        "--project-target",
-        type=Path,
-        default=DEFAULT_PROJECT_TARGET,
-        help=(
-            "Output path for approved project trajectories "
-            f"(default: {DEFAULT_PROJECT_TARGET})"
-        ),
-    )
-    args = parser.parse_args()
-    generate_stress_welltracks(
-        fact_target=Path(args.fact_target),
-        project_target=Path(args.project_target),
-    )
-
-
-if __name__ == "__main__":
-    main()
-
-===END_FILE===
-===BEGIN_FILE===	scripts/project_pack.py	10579
-#!/usr/bin/env python3
-from __future__ import annotations
-
-import argparse
-from pathlib import Path
-import re
-
-
-ARCHIVE_FILE = "all.txt"
-BEGIN = "===BEGIN_FILE==="
-END = "===END_FILE==="
-DEFAULT_CHUNK_SIZE = 1_000_000
-
-EXCLUDED_DIR_NAMES = {
-    ".git",
-    ".venv",
-    "venv",
-    "__pycache__",
-    ".mypy_cache",
-    ".pytest_cache",
-    ".ruff_cache",
-    ".idea",
-    "tests",
-}
-
-EXCLUDED_FILE_PATHS = {
-    ".windsurf/workflows/check_and_pack.yaml",
-    "pytest.ini",
-}
-
-EXCLUDED_FILE_NAMES = {
-    "conftest.py",
-}
-
-INCLUDED_FILE_EXTENSIONS = {
-    ".py",
-    # ".txt",

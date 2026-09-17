@@ -31,6 +31,7 @@ from pywp.reference_trajectories import ImportedTrajectoryWell
 from pywp.ui_utils import dls_to_pi
 from pywp.ui_well_panels import (
     _with_export_tvd,
+    survey_excel_coordinate_columns,
     survey_export_csv_bytes,
     survey_export_dataframe,
     survey_export_excel_bytes,
@@ -213,6 +214,7 @@ def build_batch_survey_excel(
         crs_display_suffix_func=crs_display_suffix_func,
         survey_export_dataframe_func=survey_export_dataframe_func,
         dls_to_pi_func=dls_to_pi_func,
+        excel_coordinates=True,
     )
     if combined.empty:
         return b""
@@ -796,6 +798,7 @@ def _build_batch_survey_export_frame(
     crs_display_suffix_func: Callable[[CoordinateSystem], str],
     survey_export_dataframe_func: SurveyExportFrameFunc,
     dls_to_pi_func: DlsToPiFunc,
+    excel_coordinates: bool = False,
 ) -> pd.DataFrame:
     if not successes:
         return pd.DataFrame()
@@ -864,6 +867,20 @@ def _build_batch_survey_export_frame(
                 azi_grid_deg=azimuth_grid_deg,
             )
         export_frame = _with_export_tvd(export_frame)
+        if excel_coordinates:
+            export_frame = survey_excel_coordinate_columns(
+                export_frame,
+                source_xy_label_suffix=crs_display_suffix_func(source_crs),
+                output_xy_label_suffix=(
+                    crs_display_suffix_func(export_context.export_crs)
+                    if export_context.should_label_export_crs
+                    else ""
+                ),
+                output_xy_unit=(
+                    "deg" if export_context.export_crs.is_geographic() else "м"
+                ),
+                include_output_xy=export_context.should_transform,
+            )
         frames.append(export_frame)
     if not frames:
         return pd.DataFrame()

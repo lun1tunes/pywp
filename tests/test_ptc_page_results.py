@@ -14,7 +14,11 @@ from pywp.anticollision import AntiCollisionAnalysis
 from pywp.coordinate_integration import transform_stations_to_crs
 from pywp.coordinate_systems import CoordinateSystem
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
-from pywp.ui_well_panels import survey_export_dataframe, survey_export_excel_bytes
+from pywp.ui_well_panels import (
+    survey_excel_coordinate_columns,
+    survey_export_dataframe,
+    survey_export_excel_bytes,
+)
 
 
 class _RerunRequested(Exception):
@@ -2040,6 +2044,7 @@ def test_render_success_tabs_hides_plotly_panels_for_single_well_constructor(
     monkeypatch.setattr(ptc_page_results, "st", FakeStreamlit())
     monkeypatch.setattr(ptc_page_results, "get_input_crs", lambda: "input-crs")
     monkeypatch.setattr(ptc_page_results, "get_selected_crs", lambda: "selected-crs")
+    monkeypatch.setattr(ptc_page_results, "get_crs_display_suffix", lambda crs: f" ({crs})")
     monkeypatch.setattr(ptc_page_results, "should_auto_convert", lambda: False)
     monkeypatch.setattr(ptc_page_results, "csv_export_crs", lambda *_args, **_kwargs: "input-crs")
     monkeypatch.setattr(ptc_page_results.wt, "_well_color_map", lambda _records: {})
@@ -2190,15 +2195,25 @@ def test_render_success_tabs_passes_azimuths_and_source_xy_to_single_well_export
     export_stations = table_kwargs["survey_export_stations"]
     assert export_stations is not success.stations
     payload = survey_export_excel_bytes(
-        survey_export_dataframe(
-            export_stations,
-            xy_label_suffix=table_kwargs["survey_export_xy_label_suffix"],
-            xy_unit=table_kwargs["survey_export_xy_unit"],
+        survey_excel_coordinate_columns(
+            survey_export_dataframe(
+                export_stations,
+                xy_label_suffix=table_kwargs["survey_export_xy_label_suffix"],
+                xy_unit=table_kwargs["survey_export_xy_unit"],
+            ),
+            source_xy_label_suffix=table_kwargs["survey_excel_source_xy_label_suffix"],
+            output_xy_label_suffix=table_kwargs["survey_export_xy_label_suffix"],
+            output_xy_unit=table_kwargs["survey_export_xy_unit"],
+            include_output_xy=table_kwargs["survey_excel_include_output_xy"],
         )
     )
     exported = pd.read_excel(BytesIO(payload))
-    np.testing.assert_array_equal(exported["N_m"], success.stations["Y_m"])
-    np.testing.assert_array_equal(exported["E_m"], success.stations["X_m"])
+    np.testing.assert_array_equal(exported["X_ГК_13N_42_m"], success.stations["X_m"])
+    np.testing.assert_array_equal(exported["Y_ГК_13N_42_m"], success.stations["Y_m"])
+    assert not {"E_m", "N_m", "X_m", "Y_m"}.intersection(exported.columns)
+    assert table_kwargs["survey_excel_include_output_xy"] == (
+        auto_convert and target_crs != source_crs
+    )
     expected = success.stations
     if auto_convert and target_crs != source_crs:
         expected = transform_stations_to_crs(
@@ -2269,6 +2284,7 @@ def test_render_success_tabs_keeps_single_well_plots_when_calc_params_are_stale(
     )
     monkeypatch.setattr(ptc_page_results, "get_input_crs", lambda: "input-crs")
     monkeypatch.setattr(ptc_page_results, "get_selected_crs", lambda: "selected-crs")
+    monkeypatch.setattr(ptc_page_results, "get_crs_display_suffix", lambda crs: f" ({crs})")
     monkeypatch.setattr(ptc_page_results, "should_auto_convert", lambda: False)
     monkeypatch.setattr(ptc_page_results, "csv_export_crs", lambda *_args, **_kwargs: "input-crs")
     monkeypatch.setattr(ptc_page_results.wt, "_well_color_map", lambda _records: {})

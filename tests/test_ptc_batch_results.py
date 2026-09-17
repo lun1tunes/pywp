@@ -325,6 +325,50 @@ def test_build_batch_survey_excel_returns_xlsx_payload() -> None:
 
     assert result["well_name"].tolist() == ["WELL-01", "WELL-01"]
     assert result["TVD_m"].tolist() == pytest.approx([0.0, 50.0])
+    assert result["X_ГК_13N_42_m"].tolist() == [10.0, 20.0]
+    assert result["Y_ГК_13N_42_m"].tolist() == [20.0, 30.0]
+    assert not {"E_m", "N_m", "X_m", "Y_m"}.intersection(result.columns)
+
+
+def test_survey_excel_unsupported_conversion_labels_only_source_crs() -> None:
+    result = pd.read_excel(BytesIO(ptc_batch_results.build_batch_survey_excel(
+        [_success()],
+        source_crs=CoordinateSystem.LOCAL,
+        target_crs=CoordinateSystem.WGS84,
+    )))
+
+    assert result["X_LOCAL_m"].tolist() == [10.0]
+    assert result["Y_LOCAL_m"].tolist() == [20.0]
+    assert not {"E_m", "N_m", "X_m", "Y_m", "X_WGS_deg", "Y_WGS_deg"}.intersection(
+        result.columns
+    )
+
+
+def test_survey_excel_and_targets_use_same_crs_axis_labels() -> None:
+    args = dict(
+        source_crs=CoordinateSystem.PULKOVO_1942_GK_13N,
+        target_crs=CoordinateSystem.WGS84,
+    )
+    stations = pd.DataFrame({
+        "MD_m": [0.0, 100.0, 200.0],
+        "X_m": [500000.0, 500100.0, 500200.0],
+        "Y_m": [6500000.0, 6500100.0, 6500200.0],
+        "Z_m": [0.0, 50.0, 100.0],
+    })
+    record = _record(points=tuple(
+        WelltrackPoint(x=row.X_m, y=row.Y_m, z=row.Z_m, md=float(i))
+        for i, row in enumerate(stations.itertuples(), start=1)
+    ))
+    survey = pd.read_excel(BytesIO(ptc_batch_results.build_batch_survey_excel(
+        [_success(stations=stations)], **args,
+    )))
+    targets = pd.read_excel(BytesIO(ptc_batch_results.build_batch_target_excel(
+        [record], **args,
+    )))
+    columns = ["X_ГК_13N_42_m", "Y_ГК_13N_42_m", "X_WGS_deg", "Y_WGS_deg"]
+    assert [c for c in survey if c.startswith(("X_", "Y_"))] == columns
+    assert [c for c in targets if c.startswith(("X_", "Y_"))] == columns
+    np.testing.assert_allclose(survey[columns], targets[columns], rtol=0.0, atol=1e-8)
 
 
 def test_build_batch_target_csv_includes_input_and_output_coordinate_blocks() -> None:
@@ -513,6 +557,12 @@ def test_build_batch_export_package_zip_collects_available_exports() -> None:
 
     with zipfile.ZipFile(BytesIO(payload)) as archive:
         names = set(archive.namelist())
+        survey_excel = pd.read_excel(BytesIO(archive.read(
+            f"survey/{ptc_batch_results.dated_export_file_name('welltrack_survey.xlsx')}"
+        )))
+        assert survey_excel["X_ГК_13N_42_m"].tolist() == [10.0, 20.0]
+        assert survey_excel["Y_ГК_13N_42_m"].tolist() == [20.0, 30.0]
+        assert not {"E_m", "N_m"}.intersection(survey_excel.columns)
 
     assert (
         f"survey/{ptc_batch_results.dated_export_file_name('welltrack_survey.csv')}"

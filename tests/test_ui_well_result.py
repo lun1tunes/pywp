@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pandas as pd
@@ -22,6 +23,49 @@ from pywp.ui_well_result import (
     uncertainty_toggle_key,
 )
 import pywp.ui_well_result as ui_well_result
+
+
+def test_result_tables_forward_excel_crs_context_without_changing_survey(monkeypatch) -> None:
+    stations = pd.DataFrame({"MD_m": [0.0], "X_m": [500000.0], "Y_m": [6500000.0], "Z_m": [0.0]})
+    export_stations = stations.assign(E_m=stations.X_m, N_m=stations.Y_m)
+    view = SingleWellResultView(
+        well_name="WELL",
+        surface=Point3D(500000.0, 6500000.0, 0.0),
+        t1=Point3D(500100.0, 6500100.0, 1000.0),
+        t3=Point3D(500200.0, 6500200.0, 1000.0),
+        stations=stations,
+        summary={},
+        config=TrajectoryConfig(),
+        azimuth_deg=45.0,
+        md_t1_m=1000.0,
+    )
+    captured = {}
+    monkeypatch.setattr(ui_well_result.st, "tabs", lambda _: (nullcontext(), nullcontext()))
+    monkeypatch.setattr(ui_well_result.st, "dataframe", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        ui_well_result, "render_survey_table_with_download",
+        lambda **kwargs: captured.update(kwargs),
+    )
+
+    ui_well_result.render_result_tables(
+        view=view,
+        t1_horizontal_offset_m=100.0,
+        survey_export_stations=export_stations,
+        survey_export_xy_label_suffix=" (WGS)",
+        survey_export_xy_unit="deg",
+        survey_excel_source_xy_label_suffix=" (ГК_13N_42)",
+        survey_excel_include_output_xy=True,
+        show_validation_section=False,
+        show_solver_diagnostics_section=False,
+    )
+
+    assert captured["stations"] is view.stations
+    assert captured["export_stations"] is export_stations
+    assert captured["excel_source_xy_label_suffix"] == " (ГК_13N_42)"
+    assert captured["excel_include_output_xy"] is True
+    assert captured["export_xy_label_suffix"] == " (WGS)"
+    assert captured["export_xy_unit"] == "deg"
+    assert "E_m" not in stations and "N_m" not in stations
 
 
 def test_md_postcheck_issue_message_is_empty_without_excess() -> None:

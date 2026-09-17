@@ -622,6 +622,8 @@ def render_result_tables(
     survey_export_stations: pd.DataFrame | None = None,
     survey_export_xy_label_suffix: str = "",
     survey_export_xy_unit: str = "м",
+    survey_excel_source_xy_label_suffix: str | None = None,
+    survey_excel_include_output_xy: bool = False,
     survey_export_azi_true_deg: object | None = None,
     survey_export_azi_grid_deg: object | None = None,
     show_validation_section: bool = True,
@@ -726,6 +728,8 @@ def render_result_tables(
                 survey_export_xy_label_suffix or fallback_xy_label_suffix
             ),
             export_xy_unit=survey_export_xy_unit or fallback_xy_unit,
+            excel_source_xy_label_suffix=survey_excel_source_xy_label_suffix,
+            excel_include_output_xy=survey_excel_include_output_xy,
             export_azi_true_deg=survey_export_azi_true_deg,
             export_azi_grid_deg=survey_export_azi_grid_deg,
         )

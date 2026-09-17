@@ -1,3 +1,31 @@
+                    "hover": [
+                        {
+                            "name": "KOP",
+                            "point": "KOP",
+                            "md": float(kop_md_value),
+                        }
+                    ],
+                    "role": "marker",
+                }
+            )
+            payload["labels"].append(
+                _point_payload_label(
+                    "KOP",
+                    kop_point,
+                    "#073B4C",
+                    role="control_point_label",
+                )
+            )
+    if sidetrack_window_point is not None:
+        window_point = _point3d_payload(sidetrack_window_point)
+        _append_arrays_for_points(x_arrays, y_arrays, z_arrays, [window_point])
+        payload["points"].append(
+            {
+                "name": "Окно зарезки",
+                "points": [window_point],
+                "color": "#4B5563",
+                "opacity": 1.0,
+                "size": 5.5,
                 "symbol": "circle",
                 "hover": [
                     {

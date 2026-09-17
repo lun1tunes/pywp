@@ -15,10 +15,12 @@ from pywp.coordinate_integration import DEFAULT_CRS
         ("wt_export_package_files_payload_cache", "package", "folder"),
     ],
 )
+@pytest.mark.parametrize("previous_version", [None, 2])
 def test_prepared_export_cache_rebuilds_legacy_files_once(
     cache_key: str,
     export_kind: str,
     export_format: str,
+    previous_version: int | None,
 ) -> None:
     items = ("calculated-pilot-and-sidetrack",)
     # Exact signature used before source N/E became mandatory in survey exports.
@@ -31,6 +33,8 @@ def test_prepared_export_cache_rebuilds_legacy_files_once(
         (),
         items,
     )
+    if previous_version is not None:
+        legacy_signature = (previous_version, *legacy_signature)
     state = {cache_key: {"signature": legacy_signature, "payload": b"old-file"}}
     signature = panel._download_signature(
         export_kind=export_kind,

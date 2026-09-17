@@ -1,3 +1,138 @@
+    global_x_offset_m: float = 0.0,
+    global_y_offset_m: float = 0.0,
+) -> list[tuple[str, pd.DataFrame]]:
+    base_records = parse_welltrack_text(BASE_SOURCE.read_text(encoding="utf-8"))
+    templates = [welltrack_points_to_targets(record.points) for record in base_records]
+    offsets = _centered_grid_offsets(
+        count=count,
+        columns=GRID_COLUMNS,
+        global_x_offset_m=global_x_offset_m,
+        global_y_offset_m=global_y_offset_m,
+    )
+    planner = TrajectoryPlanner()
+    config = _stress_config()
+    planned: list[tuple[str, pd.DataFrame]] = []
+    for index in range(count):
+        surface, t1, t3 = templates[index % len(templates)]
+        dx_m, dy_m = offsets[index]
+        shifted_surface, shifted_t1, shifted_t3 = _translate_targets(
+            surface,
+            t1,
+            t3,
+            dx_m,
+            dy_m,
+        )
+        result = planner.plan(
+            surface=shifted_surface,
+            t1=shifted_t1,
+            t3=shifted_t3,
+            config=config,
+        )
+        planned.append((f"{prefix}_{index + 1:03d}", result.stations.copy()))
+    return planned
+
+
+def _format_welltrack_text(wells: list[tuple[str, pd.DataFrame]]) -> str:
+    blocks: list[str] = []
+    for well_name, stations in wells:
+        lines = [f"WELLTRACK '{well_name}'"]
+        for row in stations[["X_m", "Y_m", "Z_m", "MD_m"]].itertuples(index=False):
+            lines.append(
+                f"{float(row.X_m):.3f} {float(row.Y_m):.3f} "
+                f"{float(row.Z_m):.3f} {float(row.MD_m):.3f}"
+            )
+        lines.append("/")
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks) + "\n"
+
+
+def generate_stress_welltracks(
+    *,
+    fact_target: Path,
+    project_target: Path,
+) -> None:
+    fact_wells = _plan_translated_wells(prefix="FACT", count=FACT_COUNT)
+    project_wells = _plan_translated_wells(
+        prefix="PROJECT",
+        count=PROJECT_COUNT,
+        global_x_offset_m=PROJECT_GLOBAL_OFFSET_X_M,
+        global_y_offset_m=PROJECT_GLOBAL_OFFSET_Y_M,
+    )
+    fact_target.write_text(_format_welltrack_text(fact_wells), encoding="utf-8")
+    project_target.write_text(_format_welltrack_text(project_wells), encoding="utf-8")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Generate large reference WELLTRACK datasets for custom 3D "
+            "performance testing."
+        )
+    )
+    parser.add_argument(
+        "--fact-target",
+        type=Path,
+        default=DEFAULT_FACT_TARGET,
+        help=f"Output path for factual trajectories (default: {DEFAULT_FACT_TARGET})",
+    )
+    parser.add_argument(
+        "--project-target",
+        type=Path,
+        default=DEFAULT_PROJECT_TARGET,
+        help=(
+            "Output path for approved project trajectories "
+            f"(default: {DEFAULT_PROJECT_TARGET})"
+        ),
+    )
+    args = parser.parse_args()
+    generate_stress_welltracks(
+        fact_target=Path(args.fact_target),
+        project_target=Path(args.project_target),
+    )
+
+
+if __name__ == "__main__":
+    main()
+
+===END_FILE===
+===BEGIN_FILE===	scripts/project_pack.py	10579
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+import re
+
+
+ARCHIVE_FILE = "all.txt"
+BEGIN = "===BEGIN_FILE==="
+END = "===END_FILE==="
+DEFAULT_CHUNK_SIZE = 1_000_000
+
+EXCLUDED_DIR_NAMES = {
+    ".git",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".idea",
+    "tests",
+}
+
+EXCLUDED_FILE_PATHS = {
+    ".windsurf/workflows/check_and_pack.yaml",
+    "pytest.ini",
+}
+
+EXCLUDED_FILE_NAMES = {
+    "conftest.py",
+}
+
+INCLUDED_FILE_EXTENSIONS = {
+    ".py",
+    # ".txt",
     # ".md",
     ".ini",
     ".cfg",

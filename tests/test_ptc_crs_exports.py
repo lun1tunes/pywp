@@ -181,11 +181,22 @@ def test_pilot_and_sidetrack_exports_keep_complete_source_coordinates(
         else pd.read_csv(BytesIO(payload))
     )
     assert set(result["well_name"]) == {plan.name for plan in pilot_export_plans}
-    assert np.isfinite(result[["N_m", "E_m"]].to_numpy(dtype=float)).all()
+    source_columns = (
+        ("X_ГК_13N_42_m", "Y_ГК_13N_42_m")
+        if file_format == "excel"
+        else ("E_m", "N_m")
+    )
+    assert np.isfinite(result[list(source_columns)].to_numpy(dtype=float)).all()
+    if file_format == "excel":
+        assert not {"N_m", "E_m", "X_m", "Y_m"}.intersection(result.columns)
+        assert result.columns.is_unique
+        assert result.columns.get_loc(source_columns[1]) == (
+            result.columns.get_loc(source_columns[0]) + 1
+        )
     for plan, before in zip(pilot_export_plans, snapshots, strict=True):
         rows = result.loc[result["well_name"] == plan.name].reset_index(drop=True)
         assert len(rows) == len(before)
-        for exported_column, source_column in (("N_m", "Y_m"), ("E_m", "X_m")):
+        for exported_column, source_column in zip(source_columns, ("X_m", "Y_m")):
             np.testing.assert_allclose(
                 rows[exported_column], before[source_column], rtol=0.0, atol=1e-8
             )
@@ -200,6 +211,17 @@ def test_pilot_and_sidetrack_exports_keep_complete_source_coordinates(
                 xy_label_suffix=get_crs_display_suffix(target_crs),
                 xy_unit="deg" if target_crs.is_geographic() else "м",
             )
+            if file_format == "excel":
+                assert result.columns.get_loc(expected_xy.columns[0]) == (
+                    result.columns.get_loc(source_columns[1]) + 1
+                )
+        elif file_format == "excel":
+            expected_xy = expected_xy.rename(
+                columns=dict(zip(("X_m", "Y_m"), source_columns))
+            )
+        if file_format == "excel":
+            expected_columns = list(dict.fromkeys([*source_columns, *expected_xy.columns]))
+            assert [c for c in rows if c.startswith(("X_", "Y_"))] == expected_columns
         np.testing.assert_allclose(
             rows[expected_xy.columns], expected_xy, rtol=0.0, atol=1e-8
         )

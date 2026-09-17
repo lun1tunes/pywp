@@ -1556,6 +1556,7 @@ def render_success_tabs(
         survey_export_xy_unit = "м"
         survey_export_azi_true_deg = None
         survey_export_azi_grid_deg = None
+        survey_excel_include_output_xy = False
         survey_export_crs = csv_export_crs(
             selected_crs,
             input_crs,
@@ -1572,6 +1573,7 @@ def render_success_tabs(
                 input_crs,
                 rename_columns=False,
             )
+            survey_excel_include_output_xy = True
         if auto_convert and selected_crs != input_crs:
             survey_export_xy_label_suffix = get_crs_display_suffix(survey_export_crs)
             survey_export_xy_unit = "deg" if survey_export_crs.is_geographic() else "м"
@@ -1635,6 +1637,8 @@ def render_success_tabs(
             survey_export_stations=survey_export_stations,
             survey_export_xy_label_suffix=survey_export_xy_label_suffix,
             survey_export_xy_unit=survey_export_xy_unit,
+            survey_excel_source_xy_label_suffix=get_crs_display_suffix(input_crs),
+            survey_excel_include_output_xy=survey_excel_include_output_xy,
             survey_export_azi_true_deg=survey_export_azi_true_deg,
             survey_export_azi_grid_deg=survey_export_azi_grid_deg,
             show_validation_section=False,

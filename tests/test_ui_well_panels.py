@@ -13,6 +13,7 @@ from pywp.ui_well_panels import (
     render_trajectory_dls_panel,
     render_survey_table_with_download,
     survey_export_dataframe,
+    survey_excel_coordinate_columns,
     survey_source_coordinates,
 )
 
@@ -51,6 +52,80 @@ def test_survey_source_coordinates_uses_source_xy_without_mutating_cache(
         result.attrs["uncertainty_reference_stations"],
         before.attrs["uncertainty_reference_stations"],
     )
+
+
+@pytest.mark.parametrize("n_first", [True, False])
+@pytest.mark.parametrize("converted", [True, False])
+def test_excel_coordinate_blocks_have_xy_order_and_keep_source_values(
+    n_first: bool,
+    converted: bool,
+) -> None:
+    source = pd.DataFrame({"MD_m": [100.0, 200.0]}, index=[4, 9])
+    values = {"N_m": [6500000.0, 6500100.0], "E_m": [500000.0, 500200.0]}
+    for name in ("N_m", "E_m") if n_first else ("E_m", "N_m"):
+        source[name] = values[name]
+    source["X_m"] = [75.0, 75.1] if converted else values["E_m"]
+    source["Y_m"] = [58.0, 58.1] if converted else values["N_m"]
+    source["Z_m"] = [300.0, 400.0]
+    label = " (WGS)" if converted else ""
+    unit = "deg" if converted else "м"
+    prepared = survey_export_dataframe(source, xy_label_suffix=label, xy_unit=unit)
+    before = prepared.copy(deep=True)
+
+    result = survey_excel_coordinate_columns(
+        prepared,
+        source_xy_label_suffix=" (ГК_13N_42)",
+        output_xy_label_suffix=label,
+        output_xy_unit=unit,
+        include_output_xy=converted,
+    )
+
+    expected_columns = ["MD_m", "X_ГК_13N_42_m", "Y_ГК_13N_42_m"]
+    if converted:
+        expected_columns += ["X_WGS_deg", "Y_WGS_deg"]
+        np.testing.assert_array_equal(result["X_WGS_deg"], [75.0, 75.1])
+        np.testing.assert_array_equal(result["Y_WGS_deg"], [58.0, 58.1])
+    assert result.columns.tolist() == [*expected_columns, "Z_m"]
+    np.testing.assert_array_equal(result["X_ГК_13N_42_m"], values["E_m"])
+    np.testing.assert_array_equal(result["Y_ГК_13N_42_m"], values["N_m"])
+    pd.testing.assert_index_equal(result.index, before.index)
+    pd.testing.assert_frame_equal(prepared, before)
+
+
+def test_excel_coordinate_blocks_support_unrenamed_output_from_legacy_callback() -> None:
+    frame = pd.DataFrame({
+        "MD_m": [10.0],
+        "N_m": [6500000.0], "E_m": [500000.0],
+        "X_m": [75.0], "Y_m": [58.0],
+    })
+    result = survey_excel_coordinate_columns(
+        frame,
+        source_xy_label_suffix=" (ГК_13N_42)",
+        output_xy_label_suffix=" (WGS)",
+        output_xy_unit="deg",
+        include_output_xy=True,
+    )
+    assert result.columns.tolist() == [
+        "MD_m", "X_ГК_13N_42_m", "Y_ГК_13N_42_m", "X_WGS_deg", "Y_WGS_deg",
+    ]
+    assert result.iloc[0].tolist() == [10.0, 500000.0, 6500000.0, 75.0, 58.0]
+
+
+@pytest.mark.parametrize("missing", ["source_values", "source_label", "output_label", "output_values"])
+def test_excel_coordinate_blocks_reject_missing_coordinate_context(missing: str) -> None:
+    frame = pd.DataFrame({"E_m": [500000.0], "N_m": [6500000.0], "X_m": [75.0], "Y_m": [58.0]})
+    if missing == "source_values":
+        frame = frame.drop(columns=["E_m"])
+    if missing == "output_values":
+        frame = frame.drop(columns=["X_m"])
+    with pytest.raises(ValueError):
+        survey_excel_coordinate_columns(
+            frame,
+            source_xy_label_suffix="" if missing == "source_label" else " (ГК_13N_42)",
+            output_xy_label_suffix="" if missing == "output_label" else " (WGS)",
+            output_xy_unit="deg",
+            include_output_xy=True,
+        )
 
 
 def test_survey_export_dataframe_labels_geographic_xy_columns() -> None:
@@ -178,6 +253,8 @@ def test_survey_download_uses_export_stations_without_changing_display(
         export_stations=pd.DataFrame(
             {
                 "MD_m": [0.0, 125.0],
+                "N_m": [6500000.0, 6500260.0],
+                "E_m": [500000.0, 500180.0],
                 "X_m": [110.0, 180.0],
                 "Y_m": [220.0, 260.0],
                 "Z_m": [-63.0, 62.0],
@@ -185,6 +262,8 @@ def test_survey_download_uses_export_stations_without_changing_display(
         ),
         export_xy_label_suffix=" (WGS)",
         export_xy_unit="deg",
+        excel_source_xy_label_suffix=" (ГК_13N_42)",
+        excel_include_output_xy=True,
     )
 
     display = captured["display"]
@@ -207,11 +286,19 @@ def test_survey_download_uses_export_stations_without_changing_display(
     assert exported["Y_WGS_deg"].iloc[0] == 220.0
     assert exported["Z_m"].tolist() == [-63.0, 62.0]
     assert exported["TVD_m"].tolist() == [0.0, 125.0]
+    assert exported["E_m"].tolist() == [500000.0, 500180.0]
+    assert exported["N_m"].tolist() == [6500000.0, 6500260.0]
     assert csv_download["file_name"] == "well_survey.csv"
     assert csv_download["mime"] == "text/csv"
 
     excel_download = downloads[1]
     excel_export = pd.read_excel(BytesIO(excel_download["data"]))
+    assert excel_export.columns.tolist() == [
+        "MD_m", "X_ГК_13N_42_m", "Y_ГК_13N_42_m",
+        "X_WGS_deg", "Y_WGS_deg", "Z_m", "TVD_m",
+    ]
+    assert excel_export["X_ГК_13N_42_m"].tolist() == [500000.0, 500180.0]
+    assert excel_export["Y_ГК_13N_42_m"].tolist() == [6500000.0, 6500260.0]
     assert excel_export["X_WGS_deg"].iloc[1] == 180.0
     assert excel_download["file_name"] == "well_survey.xlsx"
     assert (

@@ -2940,7 +2940,7 @@ def anticollision_focus_well_names(
     return tuple(sorted(related))
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_batch_results.py	67376
+===BEGIN_FILE===	pywp/ptc_batch_results.py	68112
 from __future__ import annotations
 
 import inspect
@@ -2974,6 +2974,7 @@ from pywp.reference_trajectories import ImportedTrajectoryWell
 from pywp.ui_utils import dls_to_pi
 from pywp.ui_well_panels import (
     _with_export_tvd,
+    survey_excel_coordinate_columns,
     survey_export_csv_bytes,
     survey_export_dataframe,
     survey_export_excel_bytes,
@@ -3156,6 +3157,7 @@ def build_batch_survey_excel(
         crs_display_suffix_func=crs_display_suffix_func,
         survey_export_dataframe_func=survey_export_dataframe_func,
         dls_to_pi_func=dls_to_pi_func,
+        excel_coordinates=True,
     )
     if combined.empty:
         return b""
@@ -3739,6 +3741,7 @@ def _build_batch_survey_export_frame(
     crs_display_suffix_func: Callable[[CoordinateSystem], str],
     survey_export_dataframe_func: SurveyExportFrameFunc,
     dls_to_pi_func: DlsToPiFunc,
+    excel_coordinates: bool = False,
 ) -> pd.DataFrame:
     if not successes:
         return pd.DataFrame()
@@ -3807,6 +3810,20 @@ def _build_batch_survey_export_frame(
                 azi_grid_deg=azimuth_grid_deg,
             )
         export_frame = _with_export_tvd(export_frame)
+        if excel_coordinates:
+            export_frame = survey_excel_coordinate_columns(
+                export_frame,
+                source_xy_label_suffix=crs_display_suffix_func(source_crs),
+                output_xy_label_suffix=(
+                    crs_display_suffix_func(export_context.export_crs)
+                    if export_context.should_label_export_crs
+                    else ""
+                ),
+                output_xy_unit=(
+                    "deg" if export_context.export_crs.is_geographic() else "м"
+                ),
+                include_output_xy=export_context.should_transform,
+            )
         frames.append(export_frame)
     if not frames:
         return pd.DataFrame()
@@ -5835,7 +5852,7 @@ _EXPORT_KINDS = (_EXPORT_KIND_TRAJECTORIES, _EXPORT_KIND_TARGETS)
 _DOWNLOAD_AUTO_BUILD_ROW_LIMIT = 5000
 # Invalidate prepared files when the export schema/semantics change, without
 # discarding the calculated trajectories or forcing a solver rerun.
-_DOWNLOAD_PAYLOAD_VERSION = 2
+_DOWNLOAD_PAYLOAD_VERSION = 3
 _WINDOWS_BLOCKED_DEV_EXPORT_DRIVES = frozenset({"c", "d"})
 _DEV_EXPORT_DIRECTORY_KEY = "wt_dev_export_directory"
 _DEV_EXPORT_PENDING_KEY = "wt_dev_export_pending"
@@ -21883,7 +21900,7 @@ def _render_zbs_actual_match_info(actual_wells: tuple[object, ...]) -> None:
         )
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_page_results.py	66685
+===BEGIN_FILE===	pywp/ptc_page_results.py	66940
 from __future__ import annotations
 
 from dataclasses import asdict, is_dataclass
@@ -23442,6 +23459,7 @@ def render_success_tabs(
         survey_export_xy_unit = "м"
         survey_export_azi_true_deg = None
         survey_export_azi_grid_deg = None
+        survey_excel_include_output_xy = False
         survey_export_crs = csv_export_crs(
             selected_crs,
             input_crs,
@@ -23458,6 +23476,7 @@ def render_success_tabs(
                 input_crs,
                 rename_columns=False,
             )
+            survey_excel_include_output_xy = True
         if auto_convert and selected_crs != input_crs:
             survey_export_xy_label_suffix = get_crs_display_suffix(survey_export_crs)
             survey_export_xy_unit = "deg" if survey_export_crs.is_geographic() else "м"
@@ -23521,6 +23540,8 @@ def render_success_tabs(
             survey_export_stations=survey_export_stations,
             survey_export_xy_label_suffix=survey_export_xy_label_suffix,
             survey_export_xy_unit=survey_export_xy_unit,
+            survey_excel_source_xy_label_suffix=get_crs_display_suffix(input_crs),
+            survey_excel_include_output_xy=survey_excel_include_output_xy,
             survey_export_azi_true_deg=survey_export_azi_true_deg,
             survey_export_azi_grid_deg=survey_export_azi_grid_deg,
             show_validation_section=False,
@@ -26924,31 +26945,3 @@ def single_well_three_payload(
                     "opacity": 1.0,
                     "size": 5.5,
                     "symbol": "circle",
-                    "hover": [
-                        {
-                            "name": "KOP",
-                            "point": "KOP",
-                            "md": float(kop_md_value),
-                        }
-                    ],
-                    "role": "marker",
-                }
-            )
-            payload["labels"].append(
-                _point_payload_label(
-                    "KOP",
-                    kop_point,
-                    "#073B4C",
-                    role="control_point_label",
-                )
-            )
-    if sidetrack_window_point is not None:
-        window_point = _point3d_payload(sidetrack_window_point)
-        _append_arrays_for_points(x_arrays, y_arrays, z_arrays, [window_point])
-        payload["points"].append(
-            {
-                "name": "Окно зарезки",
-                "points": [window_point],
-                "color": "#4B5563",
-                "opacity": 1.0,
-                "size": 5.5,
