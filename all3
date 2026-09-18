@@ -1,3 +1,293 @@
+    return f"p{int(index)}"
+
+
+def _record_note(record: WelltrackRecord, *, has_pilot: bool) -> str:
+    notes: list[str] = []
+    if is_zbs_record(record):
+        notes.append(
+            f"Боковой ствол от факта: нужна скважина {parent_name_for_zbs(record.name)}"
+        )
+    if has_pilot:
+        notes.append("Есть пилот")
+    level_count = _record_multi_horizontal_level_count(record)
+    if level_count > 1:
+        notes.append(f"Многопластовая: {level_count} уровней")
+    return "; ".join(notes)
+
+
+def _record_multi_horizontal_level_count(record: WelltrackRecord) -> int:
+    if is_zbs_record(record):
+        return zbs_multi_horizontal_level_count(tuple(record.points))
+    return record_multi_horizontal_level_count(record)
+
+
+def record_horizontal_length_preprocess_skip_reason(
+    record: WelltrackRecord,
+    *,
+    has_pilot: bool = False,
+) -> str:
+    if is_pilot_record(record):
+        return "пилот"
+    if bool(has_pilot):
+        return "есть пилот"
+    if _record_multi_horizontal_level_count(record) > 1:
+        return "многопластовая"
+    return "—"
+
+
+def _point_has_finite_xyz(point: object) -> bool:
+    return (
+        _value_is_finite(getattr(point, "x", None))
+        and _value_is_finite(getattr(point, "y", None))
+        and _value_is_finite(getattr(point, "z", None))
+    )
+
+
+def _value_is_finite(value: object) -> bool:
+    try:
+        return bool(math.isfinite(float(value)))
+    except (TypeError, ValueError):
+        return False
+
+===END_FILE===
+===BEGIN_FILE===	pywp/ptc_three_builders.py	80528
+from __future__ import annotations
+
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
+from typing import Callable
+
+import numpy as np
+import pandas as pd
+
+from pywp.anticollision import (
+    AntiCollisionAnalysis,
+    REFERENCE_ANTI_COLLISION_SCOPE_DISTANCE_M,
+    collision_display_overlays_by_well,
+    sidetrack_parent_relative_cone_overlays,
+)
+from pywp.constants import SMALL
+from pywp.models import Point3D
+from pywp.pilot_wells import is_pilot_name, well_name_key
+from pywp.plot_axes import equalized_axis_ranges
+from pywp.three_config import DEFAULT_THREE_CAMERA
+from pywp import ptc_three_overrides
+from pywp import ptc_three_payload
+from pywp.reference_trajectories import (
+    REFERENCE_WELL_ACTUAL,
+    REFERENCE_WELL_APPROVED,
+    REFERENCE_WELL_KIND_COLORS,
+    REFERENCE_WELL_KIND_LABELS,
+    ImportedTrajectoryWell,
+    reference_well_display_label,
+)
+from pywp.uncertainty import (
+    WellUncertaintyOverlay,
+    build_uncertainty_tube_mesh,
+)
+from pywp.welltrack_batch import SuccessfulWellPlan
+
+__all__ = [
+    "single_well_three_payload",
+    "single_well_target_only_three_payload",
+    "all_wells_three_payload",
+    "anticollision_three_payload",
+]
+
+THREE_BACKGROUND = "#FFFFFF"
+TRAJECTORY_COLOR_PRIMARY = "#C1121F"
+PLAN_CSB_COLOR = "#0B6E4F"
+ACTUAL_PROFILE_COLOR = "#111111"
+TARGET_COLOR_PRIMARY = "#C1121F"
+UNCERTAINTY_SURFACE_COLOR = "#5A5A5A"
+REFERENCE_LABEL_ACTUAL_COLOR = "#374151"
+REFERENCE_LABEL_APPROVED_COLOR = "#C62828"
+REFERENCE_PAD_LABEL_COLOR = "#334155"
+REFERENCE_PAD_GROUP_DISTANCE_M = 300.0
+WT_3D_RENDER_FAST = "Быстро"
+WT_3D_FAST_REFERENCE_TARGET_POINTS = 72
+WT_3D_FAST_CALC_TARGET_POINTS = 180
+WT_THREE_MAX_HOVER_POINTS_PER_TRACE = (
+    ptc_three_payload.WT_THREE_MAX_HOVER_POINTS_PER_TRACE
+)
+WT_THREE_MAX_HOVER_POINTS_PER_REFERENCE_TRACE = (
+    ptc_three_payload.WT_THREE_MAX_HOVER_POINTS_PER_REFERENCE_TRACE
+)
+
+
+@dataclass(frozen=True)
+class _ReferencePadLabel:
+    label: str
+    x: float
+    y: float
+    z: float
+
+
+def single_well_three_payload(
+    stations: pd.DataFrame,
+    *,
+    surface: Point3D,
+    t1: Point3D,
+    t3: Point3D,
+    target_pairs: tuple[tuple[Point3D, Point3D], ...] = (),
+    well_name: str | None = None,
+    md_t1_m: float | None = None,
+    kop_md_m: float | None = None,
+    trajectory_line_dash: str = "solid",
+    plan_csb_df: pd.DataFrame | None = None,
+    actual_df: pd.DataFrame | None = None,
+    uncertainty_overlay: WellUncertaintyOverlay | None = None,
+    pilot_name: str | None = None,
+    pilot_stations: pd.DataFrame | None = None,
+    pilot_study_points: tuple[Point3D, ...] = (),
+    pilot_kop_md_m: float | None = None,
+    sidetrack_window_point: Point3D | None = None,
+) -> dict[str, object]:
+    x_arrays: list[np.ndarray] = []
+    y_arrays: list[np.ndarray] = []
+    z_arrays: list[np.ndarray] = []
+    payload = _base_payload(title="3D траектория")
+
+    _append_station_line(
+        payload,
+        stations=stations,
+        name="Траектория",
+        color=TRAJECTORY_COLOR_PRIMARY,
+        width_role="line",
+        dash=trajectory_line_dash,
+        hover_name=well_name or "Траектория",
+        x_arrays=x_arrays,
+        y_arrays=y_arrays,
+        z_arrays=z_arrays,
+    )
+    if uncertainty_overlay is not None and uncertainty_overlay.samples:
+        _append_uncertainty_overlay(
+            payload,
+            overlay=uncertainty_overlay,
+            color=UNCERTAINTY_SURFACE_COLOR,
+            terminal_boundary_color=_lighten_hex(TRAJECTORY_COLOR_PRIMARY),
+            legend_label="Конус неопределенности (2σ)",
+            x_arrays=x_arrays,
+            y_arrays=y_arrays,
+            z_arrays=z_arrays,
+        )
+    if plan_csb_df is not None and len(plan_csb_df) > 0:
+        _append_station_line(
+            payload,
+            stations=plan_csb_df,
+            name="План ЦСБ",
+            color=PLAN_CSB_COLOR,
+            width_role="line",
+            hover_name="План ЦСБ",
+            x_arrays=x_arrays,
+            y_arrays=y_arrays,
+            z_arrays=z_arrays,
+        )
+    if actual_df is not None and len(actual_df) > 0:
+        _append_station_line(
+            payload,
+            stations=actual_df,
+            name="Фактический профиль",
+            color=ACTUAL_PROFILE_COLOR,
+            width_role="line",
+            hover_name="Фактический профиль",
+            x_arrays=x_arrays,
+            y_arrays=y_arrays,
+            z_arrays=z_arrays,
+        )
+    if pilot_stations is not None and len(pilot_stations) > 0:
+        _append_station_line(
+            payload,
+            stations=pilot_stations,
+            name=str(pilot_name or "Пилот"),
+            color=TRAJECTORY_COLOR_PRIMARY,
+            width_role="line",
+            hover_name=str(pilot_name or "Пилот"),
+            x_arrays=x_arrays,
+            y_arrays=y_arrays,
+            z_arrays=z_arrays,
+        )
+
+    target_points, target_labels = _target_marker_points_and_labels(
+        surface=surface,
+        t1=t1,
+        t3=t3,
+        target_pairs=target_pairs,
+    )
+    _append_arrays_for_points(x_arrays, y_arrays, z_arrays, target_points)
+    payload["points"].append(
+        {
+            "name": "Цели",
+            "points": target_points,
+            "color": TARGET_COLOR_PRIMARY,
+            "opacity": 1.0,
+            "size": 6.0,
+            "symbol": "circle",
+            "hover": [
+                _target_hover_item(label, "Цели")
+                for label in target_labels
+            ],
+            "role": "marker",
+        }
+    )
+    for target_label, target_point in zip(target_labels, target_points, strict=False):
+        if str(target_label).strip().casefold() in {"s", "s1", "s_1"}:
+            continue
+        payload["labels"].append(
+            _point_payload_label(
+                str(target_label),
+                target_point,
+                TARGET_COLOR_PRIMARY,
+                role="target_label",
+            )
+        )
+    _append_pilot_study_markers(
+        payload,
+        pilot_name=pilot_name,
+        study_points=pilot_study_points,
+        color=TRAJECTORY_COLOR_PRIMARY,
+        x_arrays=x_arrays,
+        y_arrays=y_arrays,
+        z_arrays=z_arrays,
+    )
+
+    if md_t1_m is not None and not stations.empty and "MD_m" in stations.columns:
+        calc_points = _calculated_t1_t3_points(stations, md_t1_m=float(md_t1_m))
+        if calc_points:
+            _append_arrays_for_points(x_arrays, y_arrays, z_arrays, calc_points)
+            payload["points"].append(
+                {
+                    "name": "Расчетные в t1/t3",
+                    "points": calc_points,
+                    "color": "#073B4C",
+                    "opacity": 1.0,
+                    "size": 5.0,
+                    "symbol": "diamond",
+                    "hover": [
+                        {"name": "Расчетные в t1/t3", "point": "t1"},
+                        {"name": "Расчетные в t1/t3", "point": "t3"},
+                    ],
+                    "role": "marker",
+                }
+            )
+
+    kop_station_source = stations
+    kop_md_value = kop_md_m
+    if pilot_stations is not None and len(pilot_stations) > 0 and pilot_kop_md_m is not None:
+        kop_station_source = pilot_stations
+        kop_md_value = pilot_kop_md_m
+    if kop_md_value is not None:
+        kop_point = _station_point_at_md(kop_station_source, float(kop_md_value))
+        if kop_point is not None:
+            _append_arrays_for_points(x_arrays, y_arrays, z_arrays, [kop_point])
+            payload["points"].append(
+                {
+                    "name": "KOP",
+                    "points": [kop_point],
+                    "color": "#073B4C",
+                    "opacity": 1.0,
+                    "size": 5.5,
+                    "symbol": "circle",
                     "hover": [
                         {
                             "name": "KOP",
@@ -2166,7 +2456,7 @@ def _reference_pad_labels(reference_wells: Iterable[object]) -> list[_ReferenceP
     return pad_labels
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_three_overrides.py	57424
+===BEGIN_FILE===	pywp/ptc_three_overrides.py	57437
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, MutableMapping
@@ -3249,7 +3539,7 @@ def _target_point_type(*, label: str, index: int) -> str:
         return "t1"
     if normalized == "t3" or normalized.endswith("_t3"):
         return "t3"
-    if index == 0 or normalized in {"s", "surface", "wellhead"}:
+    if index == 0 or normalized in {"s", "s1", "s_1", "surface", "wellhead"}:
         return "surface"
     if normalized.startswith("pl"):
         return "pilot"
@@ -4256,7 +4546,7 @@ def coerce_model_like(value: Any, model_cls: type[BaseModelT]) -> BaseModelT:
     return model_cls.model_validate(value, from_attributes=True)
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/reference_trajectories.py	25137
+===BEGIN_FILE===	pywp/reference_trajectories.py	25161
 from __future__ import annotations
 
 import math
@@ -4280,6 +4570,7 @@ from pywp.mcm import add_dls
 from pywp.models import Point3D
 from pywp.path_utils import normalize_user_path_text
 from pywp.pydantic_base import FrozenArbitraryModel
+from pywp.well_names import well_name_key
 
 REFERENCE_WELL_ACTUAL = "actual"
 REFERENCE_WELL_APPROVED = "approved"
@@ -4699,7 +4990,7 @@ def parse_reference_trajectory_dev_directories(
     seen_names: dict[str, Path] = {}
     for dev_file in dev_files:
         well_name = dev_file.stem
-        well_key = well_name.casefold()
+        well_key = well_name_key(well_name)
         previous_path = seen_names.get(well_key)
         if previous_path is not None:
             raise WelltrackParseError(
@@ -4839,7 +5130,7 @@ def reference_well_duplicate_name_keys(
 ) -> set[str]:
     name_counts: dict[str, int] = {}
     for well in wells:
-        key = str(well.name).strip().casefold()
+        key = well_name_key(well.name)
         if not key:
             continue
         name_counts[key] = int(name_counts.get(key, 0)) + 1
@@ -4853,9 +5144,9 @@ def reference_well_collision_name(
     duplicate_name_keys: set[str] | None = None,
 ) -> str:
     name = str(well.name)
-    name_key = name.strip().casefold()
+    name_key = well_name_key(name)
     planned_name_keys = {
-        str(item).strip().casefold()
+        well_name_key(item)
         for item in planned_names
         if str(item).strip()
     }

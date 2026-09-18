@@ -250,6 +250,53 @@ def test_parse_welltrack_points_table_accepts_pilot_rows() -> None:
     assert pilot.points[2].x == pytest.approx(300.0)
 
 
+def test_parse_welltrack_points_table_normalizes_case_and_optional_underscores() -> (
+    None
+):
+    records = parse_welltrack_points_table(
+        [
+            {"Wellname": "201PL", "Point": "s1", "X": 0.0, "Y": 0.0, "Z": 0.0},
+            {
+                "Wellname": "201_PL",
+                "Point": "pL",
+                "X": 100.0,
+                "Y": 200.0,
+                "Z": 1800.0,
+            },
+            {
+                "Wellname": "201pL",
+                "Point": "Pl_2",
+                "X": 200.0,
+                "Y": 300.0,
+                "Z": 2200.0,
+            },
+            {"Wellname": "201", "Point": "T1", "X": 600.0, "Y": 800.0, "Z": 2400.0},
+            {"Wellname": "201", "Point": "t_3", "X": 1500.0, "Y": 2000.0, "Z": 2500.0},
+        ]
+    )
+
+    assert [record.name for record in records] == ["201PL", "201"]
+    assert records[0].point_labels == ("S", "PL1", "PL2")
+    assert records[1].point_labels == ("S", "t1", "t3")
+    assert records[1].points[0] == records[0].points[0]
+
+
+def test_parse_welltrack_points_table_accepts_compact_zbs_and_multilevel_labels() -> (
+    None
+):
+    records = parse_welltrack_points_table(
+        [
+            {"Wellname": "9010zBs", "Point": "1T1", "X": 650.0, "Y": 0.0, "Z": 1500.0},
+            {"Wellname": "9010_ZBS", "Point": "1_T3", "X": 1200.0, "Y": 0.0, "Z": 1500.0},
+            {"Wellname": "9010ZBS", "Point": "2_t_1", "X": 1800.0, "Y": 0.0, "Z": 1520.0},
+            {"Wellname": "9010_zbs", "Point": "2t3", "X": 2300.0, "Y": 0.0, "Z": 1520.0},
+        ]
+    )
+
+    assert [record.name for record in records] == ["9010zBs"]
+    assert records[0].point_labels == ("1_t1", "1_t3", "2_t1", "2_t3")
+
+
 def test_parse_welltrack_points_table_accepts_zbs_rows_without_surface() -> None:
     records = parse_welltrack_points_table(
         [
@@ -552,6 +599,80 @@ def test_parse_welltrack_points_table_reports_expected_s_in_unsupported_point_er
                 {"Wellname": "WELL-A", "Point": "t3", "X": 1500.0, "Y": 2000.0, "Z": 2500.0},
             ]
         )
+
+
+def test_parse_welltrack_points_table_reports_all_row_errors_with_context() -> None:
+    with pytest.raises(WelltrackParseError) as captured:
+        parse_welltrack_points_table(
+            [
+                {
+                    "Wellname": "WELL-A",
+                    "Point": "bad-label",
+                    "X": "not-a-number",
+                    "Y": "",
+                    "Z": float("inf"),
+                },
+                {"Wellname": "", "Point": "T1", "X": 1.0, "Y": 2.0, "Z": 3.0},
+            ]
+        )
+
+    message = str(captured.value)
+    assert "Таблица точек содержит ошибки (5)" in message
+    assert "Строка 1 (скважина 'WELL-A', Point='bad-label')" in message
+    assert "метка точки не поддерживается" in message
+    assert "поле X должно быть числом; получено 'not-a-number'" in message
+    assert "поле Y пустое" in message
+    assert "поле Z должно быть конечным числом; получено inf" in message
+    assert "Строка 2: поле Wellname пустое" in message
+
+
+def test_parse_welltrack_points_table_reports_nan_well_name_as_blank() -> None:
+    with pytest.raises(WelltrackParseError) as captured:
+        parse_welltrack_points_table(
+            [
+                {
+                    "Wellname": float("nan"),
+                    "Point": "S",
+                    "X": 0.0,
+                    "Y": 0.0,
+                    "Z": 0.0,
+                }
+            ]
+        )
+
+    assert "Строка 1: поле Wellname пустое" in str(captured.value)
+
+
+def test_parse_welltrack_points_table_duplicate_reports_both_row_numbers() -> None:
+    with pytest.raises(WelltrackParseError) as captured:
+        parse_welltrack_points_table(
+            [
+                {"Wellname": "WELL-A", "Point": "S", "X": 0.0, "Y": 0.0, "Z": 0.0},
+                {"Wellname": "WELL-A", "Point": "T1", "X": 1.0, "Y": 2.0, "Z": 3.0},
+                {"Wellname": "well-a", "Point": "t_1", "X": 4.0, "Y": 5.0, "Z": 6.0},
+                {"Wellname": "WELL-A", "Point": "t3", "X": 7.0, "Y": 8.0, "Z": 9.0},
+            ]
+        )
+
+    message = str(captured.value)
+    assert "Строка 3 (скважина 'well-a', Point='t_1')" in message
+    assert "точка 't1' дублирует строку 2" in message
+    assert "скважины 'WELL-A'" in message
+
+
+def test_parse_welltrack_points_table_structural_error_lists_source_rows() -> None:
+    with pytest.raises(WelltrackParseError) as captured:
+        parse_welltrack_points_table(
+            [
+                {"Wellname": "WELL-A", "Point": "S", "X": 0.0, "Y": 0.0, "Z": 0.0},
+                {"Wellname": "", "Point": "", "X": "", "Y": "", "Z": ""},
+                {"Wellname": "WELL-A", "Point": "t1", "X": 1.0, "Y": 2.0, "Z": 3.0},
+            ]
+        )
+
+    message = str(captured.value)
+    assert "для скважины 'WELL-A' отсутствуют точки: t3" in message
+    assert "Исходные строки этой скважины: 1, 3" in message
 
 
 def test_parse_welltrack_points_table_accepts_excel_style_numeric_strings() -> None:

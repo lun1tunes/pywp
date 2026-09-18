@@ -1,3 +1,237 @@
+            for hold in hold_values
+        )
+        seed_vectors.extend(
+            np.array([build_mid, kop, inc, hold_guess], dtype=float)
+            for kop in kop_values
+            for inc in inc_values
+        )
+        seed_vectors.extend(
+            np.array([build_mid, kop_mid, inc, hold], dtype=float)
+            for inc in inc_values
+            for hold in hold_values
+        )
+        seed_vectors.extend(
+            np.array([build_unit, kop_mid, inc_mid, hold_guess], dtype=float)
+            for build_unit in build_units
+        )
+    else:
+        azimuth_values = _turn_azimuth_samples(az_surface, az_entry, lattice_points)
+        seed_vectors.extend(
+            np.array([build_mid, kop, inc_mid, hold_guess, az_mid], dtype=float)
+            for kop in kop_values
+        )
+        seed_vectors.extend(
+            np.array([build_mid, kop_mid, inc, hold_guess, az_mid], dtype=float)
+            for inc in inc_values
+        )
+        seed_vectors.extend(
+            np.array([build_mid, kop_mid, inc_mid, hold, az_mid], dtype=float)
+            for hold in hold_values
+        )
+        seed_vectors.extend(
+            np.array(
+                [build_mid, kop_mid, inc_mid, hold_guess, azimuth_deg], dtype=float
+            )
+            for azimuth_deg in azimuth_values
+        )
+        seed_vectors.extend(
+            np.array([build_mid, kop, inc, hold_guess, az_mid], dtype=float)
+            for kop in kop_values
+            for inc in inc_values
+        )
+        seed_vectors.extend(
+            np.array([build_mid, kop_mid, inc_mid, hold, azimuth_deg], dtype=float)
+            for hold in hold_values
+            for azimuth_deg in azimuth_values
+        )
+        seed_vectors.extend(
+            np.array([build_unit, kop_mid, inc_mid, hold_guess, az_mid], dtype=float)
+            for build_unit in build_units
+        )
+    fixed_components = _fixed_turn_search_components(
+        bounds=bounds,
+        split_build=False,
+        fixed_kop_vertical_m=fixed_kop_vertical_m,
+    )
+    if fixed_components:
+        seed_vectors = [
+            _apply_fixed_search_components_to_vector(
+                vector=np.asarray(seed, dtype=float),
+                bounds=bounds,
+                fixed_components=fixed_components,
+            )
+            for seed in seed_vectors
+        ]
+    return _dedupe_seed_vectors(seed_vectors)
+
+
+def _deep_low_angle_turn_seed_vectors(
+    *,
+    geometry: SectionGeometry,
+    build_units: np.ndarray,
+    bounds: tuple[tuple[float, float], ...],
+    build_dls_upper_deg_per_30m: float,
+) -> list[np.ndarray]:
+    kop_min = float(bounds[1][0])
+    inc_min, inc_max = float(bounds[2][0]), float(bounds[2][1])
+    hold_min, hold_max = float(bounds[3][0]), float(bounds[3][1])
+    vertical_room_m = float(max(geometry.z1_m - kop_min, 0.0))
+    lateral_to_t1_m = float(np.hypot(geometry.t1_east_m, geometry.t1_north_m))
+
+    if float(build_dls_upper_deg_per_30m) <= 2.4 + SMALL:
+        return []
+    if vertical_room_m < 1000.0:
+        return []
+    if vertical_room_m < 1.5 * max(lateral_to_t1_m, 100.0):
+        return []
+
+    inc_very_low = float(
+        np.clip(float(geometry.inc_entry_deg) * 0.06, inc_min, inc_max)
+    )
+    inc_low = float(np.clip(float(geometry.inc_entry_deg) * 0.14, inc_min, inc_max))
+    hold_deep = float(np.clip(0.45 * vertical_room_m, hold_min, hold_max))
+    hold_deeper = float(np.clip(0.70 * vertical_room_m, hold_min, hold_max))
+
+    focused_build_units = _dedupe_scalar_values(
+        [
+            *[float(unit) for unit in np.asarray(build_units, dtype=float).tolist()],
+            0.60,
+            0.40,
+        ],
+        lower=float(bounds[0][0]),
+        upper=float(bounds[0][1]),
+    )
+    turnaround_azimuths = _dedupe_scalar_values(
+        [
+            _normalize_azimuth_deg(float(geometry.azimuth_entry_deg) + 150.0),
+            _normalize_azimuth_deg(float(geometry.azimuth_entry_deg) - 150.0),
+        ],
+        lower=0.0,
+        upper=360.0,
+    )
+
+    seeds: list[np.ndarray] = []
+    for build_unit in focused_build_units:
+        for azimuth_deg in turnaround_azimuths:
+            seeds.append(
+                np.array(
+                    [
+                        float(build_unit),
+                        kop_min,
+                        inc_very_low,
+                        hold_deep,
+                        float(azimuth_deg),
+                    ],
+                    dtype=float,
+                )
+            )
+            seeds.append(
+                np.array(
+                    [
+                        float(build_unit),
+                        kop_min,
+                        inc_low,
+                        hold_deeper,
+                        float(azimuth_deg),
+                    ],
+                    dtype=float,
+                )
+            )
+    return seeds
+
+
+def _dedupe_scalar_values(
+    values: list[float],
+    *,
+    lower: float,
+    upper: float,
+) -> tuple[float, ...]:
+    deduped: list[float] = []
+    seen: set[float] = set()
+    for value in values:
+        clipped = float(np.clip(float(value), float(lower), float(upper)))
+        key = round(clipped, 8)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(clipped)
+    return tuple(deduped)
+
+
+def _build_unit_seed_values(search_settings: TurnSearchSettings) -> np.ndarray:
+    level = max(int(search_settings.restart_index), 0)
+    if level <= 0:
+        return np.array([1.0, 0.8], dtype=float)
+    if level == 1:
+        return np.array([1.0, 0.8, 0.5, 0.2], dtype=float)
+    return np.array([1.0, 0.8, 0.6, 0.4, 0.2], dtype=float)
+
+
+def _axis_samples(lower: float, upper: float, count: int) -> np.ndarray:
+    if count <= 1 or abs(float(upper) - float(lower)) <= SMALL:
+        return np.array([0.5 * (float(lower) + float(upper))], dtype=float)
+    return np.linspace(float(lower), float(upper), int(count), dtype=float)
+
+
+def _turn_azimuth_samples(
+    azimuth_from_deg: float,
+    azimuth_to_deg: float,
+    count: int,
+) -> np.ndarray:
+    if count <= 1:
+        return np.array(
+            [_mid_azimuth_deg(azimuth_from_deg, azimuth_to_deg)], dtype=float
+        )
+    delta_deg = _shortest_azimuth_delta_deg(azimuth_from_deg, azimuth_to_deg)
+    fractions = np.linspace(0.0, 1.0, int(count), dtype=float)
+    return np.array(
+        [
+            _normalize_azimuth_deg(float(azimuth_from_deg + fraction * delta_deg))
+            for fraction in fractions
+        ],
+        dtype=float,
+    )
+
+
+def _turn_residuals(
+    values: np.ndarray,
+    profile_builder: Callable[[np.ndarray], ProfileParameters | None],
+    target_point: np.ndarray,
+    config: TrajectoryConfig,
+) -> np.ndarray:
+    candidate = profile_builder(values)
+    if candidate is None:
+        return np.full(3, 1e6, dtype=float)
+
+    endpoint = np.array(_estimate_t1_endpoint_for_profile(candidate), dtype=float)
+    lateral_scale = max(float(config.lateral_tolerance_m), 1e-9)
+    vertical_scale = max(float(config.vertical_tolerance_m), 1e-9)
+    residuals = np.array(
+        [
+            (endpoint[0] - target_point[0]) / lateral_scale,
+            (endpoint[1] - target_point[1]) / lateral_scale,
+            (endpoint[2] - target_point[2]) / vertical_scale,
+        ],
+        dtype=float,
+    )
+    return residuals
+
+
+def _turn_scalar_cost(
+    values: np.ndarray,
+    profile_builder: Callable[[np.ndarray], ProfileParameters | None],
+    target_point: np.ndarray,
+    config: TrajectoryConfig,
+) -> float:
+    candidate = profile_builder(values)
+    if candidate is None:
+        return 1e12
+    endpoint = np.array(_estimate_t1_endpoint_for_profile(candidate), dtype=float)
+    miss = _normalized_target_miss(
+        endpoint=endpoint,
+        target_point=target_point,
+        config=config,
+    )
     return float(miss * 1e6 + candidate.md_total_m)
 
 
@@ -2940,7 +3174,7 @@ def anticollision_focus_well_names(
     return tuple(sorted(related))
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_batch_results.py	68112
+===BEGIN_FILE===	pywp/ptc_batch_results.py	69435
 from __future__ import annotations
 
 import inspect
@@ -2981,6 +3215,7 @@ from pywp.ui_well_panels import (
     survey_source_coordinates,
 )
 from pywp.welltrack_batch import SuccessfulWellPlan
+from pywp.well_names import well_name_key
 
 __all__ = [
     "BATCH_SUMMARY_DISPLAY_ORDER",
@@ -4580,7 +4815,7 @@ def _sanitize_dev_export_rows(rows: pd.DataFrame) -> pd.DataFrame:
 
 
 def _well_name_key(name: object) -> str:
-    return str(name or "").strip().casefold()
+    return well_name_key(name or "")
 
 
 def _summary_optional_float(summary: dict[str, object], key: str) -> float | None:
@@ -4791,26 +5026,47 @@ def batch_summary_display_df(summary_df: pd.DataFrame) -> pd.DataFrame:
 def pilot_sidetrack_summary_df(
     successes: list[SuccessfulWellPlan],
 ) -> pd.DataFrame:
-    success_by_name = {str(success.name): success for success in successes}
+    success_by_name = {_well_name_key(success.name): success for success in successes}
     rows: list[dict[str, object]] = []
     for success in successes:
         summary = dict(success.summary)
         if str(summary.get("trajectory_type", "")).strip() != "PILOT_SIDETRACK":
             continue
         pilot_name = str(summary.get("pilot_well_name", "")).strip()
-        pilot_success = success_by_name.get(pilot_name)
+        pilot_success = success_by_name.get(_well_name_key(pilot_name))
         pilot_summary = dict(pilot_success.summary) if pilot_success is not None else {}
         pilot_target_count = _summary_float(
             pilot_summary.get("pilot_target_count"),
             fallback=_pilot_segment_count(pilot_success),
         )
+        window_md_m = _summary_float(summary.get("sidetrack_window_md_m"))
+        pilot_total_md_m = _summary_float(
+            summary.get("pilot_total_md_m"),
+            fallback=_summary_float(pilot_summary.get("md_total_m")),
+        )
+        lateral_from_window_md_m = _summary_float(
+            summary.get("sidetrack_complete_lateral_md_m"),
+            fallback=_summary_float(summary.get("sidetrack_lateral_md_m")),
+        )
+        sidetrack_total_md_m = _summary_float(summary.get("md_total_m"))
+        if not math.isfinite(sidetrack_total_md_m):
+            sidetrack_total_md_m = _summary_float(
+                summary.get("sidetrack_total_md_m")
+            )
+        if (
+            not math.isfinite(sidetrack_total_md_m)
+            and math.isfinite(window_md_m)
+            and math.isfinite(lateral_from_window_md_m)
+        ):
+            sidetrack_total_md_m = window_md_m + lateral_from_window_md_m
+        drilled_footage_m = _summary_float(summary.get("total_drilled_footage_m"))
         rows.append(
             {
                 "Скважина": str(success.name),
                 "Пилот": pilot_name or "—",
                 "Плановых точек пилота": _optional_int_text(pilot_target_count),
                 "BUILD+HOLD до точек пилота": _optional_int_text(pilot_target_count),
-                "Окно MD, м": _summary_float(summary.get("sidetrack_window_md_m")),
+                "Окно MD, м": window_md_m,
                 "Окно Z, м": _summary_float(summary.get("sidetrack_window_z_m")),
                 "Окно INC, deg": _summary_float(
                     summary.get("sidetrack_window_inc_deg")
@@ -4818,10 +5074,10 @@ def pilot_sidetrack_summary_df(
                 "Окно AZI, deg": _summary_float(
                     summary.get("sidetrack_window_azi_deg")
                 ),
-                "MD пилота, м": _summary_float(pilot_summary.get("md_total_m")),
-                "MD бокового ствола, м": _summary_float(
-                    summary.get("sidetrack_lateral_md_m")
-                ),
+                "MD пилота от устья до забоя, м": pilot_total_md_m,
+                "MD бокового ствола от устья до забоя, м": sidetrack_total_md_m,
+                "Боковой ствол от окна до забоя, м": lateral_from_window_md_m,
+                "Суммарный метраж бурения, м": drilled_footage_m,
                 "Макс ПИ пилота, deg/10m": dls_to_pi(
                     _summary_float(pilot_summary.get("max_dls_total_deg_per_30m"))
                 ),
@@ -4838,8 +5094,10 @@ def pilot_sidetrack_summary_df(
             "Окно Z, м",
             "Окно INC, deg",
             "Окно AZI, deg",
-            "MD пилота, м",
-            "MD бокового ствола, м",
+            "MD пилота от устья до забоя, м",
+            "MD бокового ствола от устья до забоя, м",
+            "Боковой ствол от окна до забоя, м",
+            "Суммарный метраж бурения, м",
             "Макс ПИ пилота, deg/10m",
         ],
     )
@@ -4880,7 +5138,10 @@ def has_md_postcheck_warning(summary_df: pd.DataFrame) -> bool:
     return bool(
         summary_df["Проблема"]
         .astype(str)
-        .str.contains("Превышен лимит итоговой MD", regex=False)
+        .str.contains(
+            r"Превышен лимит (?:итоговой MD|MD пилота|MD бокового ствола)",
+            regex=True,
+        )
         .any()
     )
 
@@ -4899,7 +5160,7 @@ def _pilot_segment_count(success: SuccessfulWellPlan | None) -> float:
 def _summary_float(value: object, *, fallback: float = float("nan")) -> float:
     try:
         numeric_value = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return fallback
     if not math.isfinite(numeric_value):
         return fallback
@@ -5795,7 +6056,7 @@ def run_batch_if_clicked(
         live_log_placeholder.empty()
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_batch_summary_panel.py	59087
+===BEGIN_FILE===	pywp/ptc_batch_summary_panel.py	59470
 from __future__ import annotations
 
 from collections.abc import Callable, MutableMapping
@@ -5974,7 +6235,7 @@ def render_batch_summary(
     render_small_note_func(f"Последний запуск: {state.get('wt_last_run_at', '—')}")
     if ptc_batch_results.has_md_postcheck_warning(summary_df):
         st_module.caption(
-            "Скважины с превышением лимита итоговой MD отображаются пунктирной "
+            "Скважины с превышением лимита MD отображаются пунктирной "
             "траекторией на графиках."
         )
 
@@ -6074,11 +6335,17 @@ def render_batch_summary(
                 "Окно AZI, deg": st_module.column_config.NumberColumn(
                     "Окно AZI, deg", format="%.2f", width="small"
                 ),
-                "MD пилота, м": st_module.column_config.NumberColumn(
+                "MD пилота от устья до забоя, м": st_module.column_config.NumberColumn(
                     "MD пилота, м", format="%.2f", width="small"
                 ),
-                "MD бокового ствола, м": st_module.column_config.NumberColumn(
+                "MD бокового ствола от устья до забоя, м": st_module.column_config.NumberColumn(
                     "MD бокового, м", format="%.2f", width="small"
+                ),
+                "Боковой ствол от окна до забоя, м": st_module.column_config.NumberColumn(
+                    "От окна до забоя, м", format="%.2f", width="small"
+                ),
+                "Суммарный метраж бурения, м": st_module.column_config.NumberColumn(
+                    "Метраж бурения, м", format="%.2f", width="small"
                 ),
                 "Макс ПИ пилота, deg/10m": st_module.column_config.NumberColumn(
                     "Макс ПИ пилота, deg/10m", format="%.2f", width="small"
@@ -7410,7 +7677,7 @@ def _as_selection_list(value: object) -> list[object]:
     return []
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_core.py	388704
+===BEGIN_FILE===	pywp/ptc_core.py	388774
 from __future__ import annotations
 
 import colorsys
@@ -14136,7 +14403,7 @@ def _render_target_table_help() -> None:
                 "Z": "Zpl2",
             },
         ],
-        "Пилот задаётся отдельной записью с тем же базовым именем и суффиксом `_PL`. Используйте точки `S`, `PL1`, `PL2`, ... без пропусков. Точек пилота может быть сколько угодно: от `PL1` до `PLN`.",
+        "Пилот задаётся отдельной записью с тем же базовым именем и суффиксом `_PL` или `PL`. Используйте точки `S`, `PL1`, `PL2`, ... без пропусков. Точек пилота может быть сколько угодно: от `PL1` до `PLN`.",
     )
     _render_example(
         "ЗБС от фактической скважины",
@@ -14541,7 +14808,8 @@ def _render_source_input() -> None:
         st.caption(
             "Вставьте из Excel колонки `Wellname`, `Point`, `X`, `Y`, `Z`. "
             "В колонке `Point`: `S` - устье скважины; обычная скважина - `S`, `t1`, `t3` "
-            "(две точки в пласте); несколько точек - `S`, `t1`, `t2`, `t3`, ... ."
+            "(две точки в пласте); несколько точек - `S`, `t1`, `t2`, `t3`, ... . "
+            "Допустимы `S` и `S1`; регистр меток не важен."
         )
         with st.expander(
             "Как задавать скважины с пилотом, ЗБС и многопластовые скважины",
@@ -24609,7 +24877,7 @@ def apply_editor_sidetrack_window_defaults(
         state.pop(SIDETRACK_EDITOR_OVERRIDES_KEY, None)
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_target_import.py	33779
+===BEGIN_FILE===	pywp/ptc_target_import.py	33450
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
@@ -24625,6 +24893,7 @@ from pywp.eclipse_welltrack import (
     WelltrackRecord,
     WelltrackParseError,
     decode_welltrack_bytes,
+    normalize_welltrack_table_point_label,
     parse_welltrack_points_table,
     parse_welltrack_text,
 )
@@ -24888,16 +25157,8 @@ def normalize_source_table_df_for_ui(table_df: pd.DataFrame | None) -> pd.DataFr
 
 
 def _normalize_source_table_point_value(value: object) -> object:
-    text = str(value).strip()
-    if text.lower() in {"wellhead", "s"}:
-        return "S"
-    multi_match = re.match(r"^([1-9]\d*)_t([13])$", text, flags=re.IGNORECASE)
-    if multi_match is not None:
-        return f"{int(multi_match.group(1))}_t{int(multi_match.group(2))}"
-    pilot_match = re.match(r"^pl([1-9]\d*)$", text, flags=re.IGNORECASE)
-    if pilot_match is not None:
-        return f"PL{int(pilot_match.group(1))}"
-    return value
+    normalized = normalize_welltrack_table_point_label(value)
+    return value if normalized is None else normalized
 
 
 def normalized_target_source_format(
@@ -24993,7 +25254,7 @@ def build_target_import_operation(
             progress_message="Разбор таблицы точек...",
             count_message_template="Собрано скважин из таблицы: {record_count}.",
             success_label_template="Импорт таблицы завершен за {elapsed_s:.2f} с",
-            error_label="Ошибка разбора табличного WELLTRACK",
+            error_label="Ошибка импорта таблицы точек",
             table_rows=pd.DataFrame(table_rows),
             parse_welltrack_text_func=parse_welltrack_text_func,
         )
@@ -25233,8 +25494,7 @@ def expand_single_column_source_table_df(table_df: pd.DataFrame) -> pd.DataFrame
     for raw_value in non_blank_values:
         tokens = [
             token.strip()
-            for token in re.split(r"[\t;]+", raw_value)
-            if token.strip()
+            for token in re.split(r"[\t;]", raw_value)
         ]
         if len(tokens) not in {5, 6}:
             return table_df
@@ -25301,7 +25561,7 @@ def _parse_dev_target_payload(
             continue
         assert parsed_item is not None
         record, summary, imported_well = parsed_item
-        well_key = str(imported_well.name).strip().casefold()
+        well_key = well_name_key(imported_well.name)
         if well_key in seen_success_keys:
             failures.append(
                 TargetImportFailure(
@@ -25437,7 +25697,7 @@ def dev_source_preview_well_names(
         normalized = str(raw_name).strip()
         if not normalized:
             return
-        key = normalized.casefold()
+        key = well_name_key(normalized)
         if key in seen:
             return
         seen.add(key)
@@ -26655,293 +26915,3 @@ def _point_label(
         return "t1"
     if int(index) == 3:
         return "t3"
-    return f"p{int(index)}"
-
-
-def _record_note(record: WelltrackRecord, *, has_pilot: bool) -> str:
-    notes: list[str] = []
-    if is_zbs_record(record):
-        notes.append(
-            f"Боковой ствол от факта: нужна скважина {parent_name_for_zbs(record.name)}"
-        )
-    if has_pilot:
-        notes.append("Есть пилот")
-    level_count = _record_multi_horizontal_level_count(record)
-    if level_count > 1:
-        notes.append(f"Многопластовая: {level_count} уровней")
-    return "; ".join(notes)
-
-
-def _record_multi_horizontal_level_count(record: WelltrackRecord) -> int:
-    if is_zbs_record(record):
-        return zbs_multi_horizontal_level_count(tuple(record.points))
-    return record_multi_horizontal_level_count(record)
-
-
-def record_horizontal_length_preprocess_skip_reason(
-    record: WelltrackRecord,
-    *,
-    has_pilot: bool = False,
-) -> str:
-    if is_pilot_record(record):
-        return "пилот"
-    if bool(has_pilot):
-        return "есть пилот"
-    if _record_multi_horizontal_level_count(record) > 1:
-        return "многопластовая"
-    return "—"
-
-
-def _point_has_finite_xyz(point: object) -> bool:
-    return (
-        _value_is_finite(getattr(point, "x", None))
-        and _value_is_finite(getattr(point, "y", None))
-        and _value_is_finite(getattr(point, "z", None))
-    )
-
-
-def _value_is_finite(value: object) -> bool:
-    try:
-        return bool(math.isfinite(float(value)))
-    except (TypeError, ValueError):
-        return False
-
-===END_FILE===
-===BEGIN_FILE===	pywp/ptc_three_builders.py	80510
-from __future__ import annotations
-
-from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
-from typing import Callable
-
-import numpy as np
-import pandas as pd
-
-from pywp.anticollision import (
-    AntiCollisionAnalysis,
-    REFERENCE_ANTI_COLLISION_SCOPE_DISTANCE_M,
-    collision_display_overlays_by_well,
-    sidetrack_parent_relative_cone_overlays,
-)
-from pywp.constants import SMALL
-from pywp.models import Point3D
-from pywp.pilot_wells import is_pilot_name, well_name_key
-from pywp.plot_axes import equalized_axis_ranges
-from pywp.three_config import DEFAULT_THREE_CAMERA
-from pywp import ptc_three_overrides
-from pywp import ptc_three_payload
-from pywp.reference_trajectories import (
-    REFERENCE_WELL_ACTUAL,
-    REFERENCE_WELL_APPROVED,
-    REFERENCE_WELL_KIND_COLORS,
-    REFERENCE_WELL_KIND_LABELS,
-    ImportedTrajectoryWell,
-    reference_well_display_label,
-)
-from pywp.uncertainty import (
-    WellUncertaintyOverlay,
-    build_uncertainty_tube_mesh,
-)
-from pywp.welltrack_batch import SuccessfulWellPlan
-
-__all__ = [
-    "single_well_three_payload",
-    "single_well_target_only_three_payload",
-    "all_wells_three_payload",
-    "anticollision_three_payload",
-]
-
-THREE_BACKGROUND = "#FFFFFF"
-TRAJECTORY_COLOR_PRIMARY = "#C1121F"
-PLAN_CSB_COLOR = "#0B6E4F"
-ACTUAL_PROFILE_COLOR = "#111111"
-TARGET_COLOR_PRIMARY = "#C1121F"
-UNCERTAINTY_SURFACE_COLOR = "#5A5A5A"
-REFERENCE_LABEL_ACTUAL_COLOR = "#374151"
-REFERENCE_LABEL_APPROVED_COLOR = "#C62828"
-REFERENCE_PAD_LABEL_COLOR = "#334155"
-REFERENCE_PAD_GROUP_DISTANCE_M = 300.0
-WT_3D_RENDER_FAST = "Быстро"
-WT_3D_FAST_REFERENCE_TARGET_POINTS = 72
-WT_3D_FAST_CALC_TARGET_POINTS = 180
-WT_THREE_MAX_HOVER_POINTS_PER_TRACE = (
-    ptc_three_payload.WT_THREE_MAX_HOVER_POINTS_PER_TRACE
-)
-WT_THREE_MAX_HOVER_POINTS_PER_REFERENCE_TRACE = (
-    ptc_three_payload.WT_THREE_MAX_HOVER_POINTS_PER_REFERENCE_TRACE
-)
-
-
-@dataclass(frozen=True)
-class _ReferencePadLabel:
-    label: str
-    x: float
-    y: float
-    z: float
-
-
-def single_well_three_payload(
-    stations: pd.DataFrame,
-    *,
-    surface: Point3D,
-    t1: Point3D,
-    t3: Point3D,
-    target_pairs: tuple[tuple[Point3D, Point3D], ...] = (),
-    well_name: str | None = None,
-    md_t1_m: float | None = None,
-    kop_md_m: float | None = None,
-    trajectory_line_dash: str = "solid",
-    plan_csb_df: pd.DataFrame | None = None,
-    actual_df: pd.DataFrame | None = None,
-    uncertainty_overlay: WellUncertaintyOverlay | None = None,
-    pilot_name: str | None = None,
-    pilot_stations: pd.DataFrame | None = None,
-    pilot_study_points: tuple[Point3D, ...] = (),
-    pilot_kop_md_m: float | None = None,
-    sidetrack_window_point: Point3D | None = None,
-) -> dict[str, object]:
-    x_arrays: list[np.ndarray] = []
-    y_arrays: list[np.ndarray] = []
-    z_arrays: list[np.ndarray] = []
-    payload = _base_payload(title="3D траектория")
-
-    _append_station_line(
-        payload,
-        stations=stations,
-        name="Траектория",
-        color=TRAJECTORY_COLOR_PRIMARY,
-        width_role="line",
-        dash=trajectory_line_dash,
-        hover_name=well_name or "Траектория",
-        x_arrays=x_arrays,
-        y_arrays=y_arrays,
-        z_arrays=z_arrays,
-    )
-    if uncertainty_overlay is not None and uncertainty_overlay.samples:
-        _append_uncertainty_overlay(
-            payload,
-            overlay=uncertainty_overlay,
-            color=UNCERTAINTY_SURFACE_COLOR,
-            terminal_boundary_color=_lighten_hex(TRAJECTORY_COLOR_PRIMARY),
-            legend_label="Конус неопределенности (2σ)",
-            x_arrays=x_arrays,
-            y_arrays=y_arrays,
-            z_arrays=z_arrays,
-        )
-    if plan_csb_df is not None and len(plan_csb_df) > 0:
-        _append_station_line(
-            payload,
-            stations=plan_csb_df,
-            name="План ЦСБ",
-            color=PLAN_CSB_COLOR,
-            width_role="line",
-            hover_name="План ЦСБ",
-            x_arrays=x_arrays,
-            y_arrays=y_arrays,
-            z_arrays=z_arrays,
-        )
-    if actual_df is not None and len(actual_df) > 0:
-        _append_station_line(
-            payload,
-            stations=actual_df,
-            name="Фактический профиль",
-            color=ACTUAL_PROFILE_COLOR,
-            width_role="line",
-            hover_name="Фактический профиль",
-            x_arrays=x_arrays,
-            y_arrays=y_arrays,
-            z_arrays=z_arrays,
-        )
-    if pilot_stations is not None and len(pilot_stations) > 0:
-        _append_station_line(
-            payload,
-            stations=pilot_stations,
-            name=str(pilot_name or "Пилот"),
-            color=TRAJECTORY_COLOR_PRIMARY,
-            width_role="line",
-            hover_name=str(pilot_name or "Пилот"),
-            x_arrays=x_arrays,
-            y_arrays=y_arrays,
-            z_arrays=z_arrays,
-        )
-
-    target_points, target_labels = _target_marker_points_and_labels(
-        surface=surface,
-        t1=t1,
-        t3=t3,
-        target_pairs=target_pairs,
-    )
-    _append_arrays_for_points(x_arrays, y_arrays, z_arrays, target_points)
-    payload["points"].append(
-        {
-            "name": "Цели",
-            "points": target_points,
-            "color": TARGET_COLOR_PRIMARY,
-            "opacity": 1.0,
-            "size": 6.0,
-            "symbol": "circle",
-            "hover": [
-                _target_hover_item(label, "Цели")
-                for label in target_labels
-            ],
-            "role": "marker",
-        }
-    )
-    for target_label, target_point in zip(target_labels, target_points, strict=False):
-        if str(target_label).strip().upper() == "S":
-            continue
-        payload["labels"].append(
-            _point_payload_label(
-                str(target_label),
-                target_point,
-                TARGET_COLOR_PRIMARY,
-                role="target_label",
-            )
-        )
-    _append_pilot_study_markers(
-        payload,
-        pilot_name=pilot_name,
-        study_points=pilot_study_points,
-        color=TRAJECTORY_COLOR_PRIMARY,
-        x_arrays=x_arrays,
-        y_arrays=y_arrays,
-        z_arrays=z_arrays,
-    )
-
-    if md_t1_m is not None and not stations.empty and "MD_m" in stations.columns:
-        calc_points = _calculated_t1_t3_points(stations, md_t1_m=float(md_t1_m))
-        if calc_points:
-            _append_arrays_for_points(x_arrays, y_arrays, z_arrays, calc_points)
-            payload["points"].append(
-                {
-                    "name": "Расчетные в t1/t3",
-                    "points": calc_points,
-                    "color": "#073B4C",
-                    "opacity": 1.0,
-                    "size": 5.0,
-                    "symbol": "diamond",
-                    "hover": [
-                        {"name": "Расчетные в t1/t3", "point": "t1"},
-                        {"name": "Расчетные в t1/t3", "point": "t3"},
-                    ],
-                    "role": "marker",
-                }
-            )
-
-    kop_station_source = stations
-    kop_md_value = kop_md_m
-    if pilot_stations is not None and len(pilot_stations) > 0 and pilot_kop_md_m is not None:
-        kop_station_source = pilot_stations
-        kop_md_value = pilot_kop_md_m
-    if kop_md_value is not None:
-        kop_point = _station_point_at_md(kop_station_source, float(kop_md_value))
-        if kop_point is not None:
-            _append_arrays_for_points(x_arrays, y_arrays, z_arrays, [kop_point])
-            payload["points"].append(
-                {
-                    "name": "KOP",
-                    "points": [kop_point],
-                    "color": "#073B4C",
-                    "opacity": 1.0,
-                    "size": 5.5,
-                    "symbol": "circle",

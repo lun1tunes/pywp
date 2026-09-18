@@ -1149,6 +1149,11 @@ def test_pilot_sidetrack_summary_df_reports_window_and_pilot_metrics() -> None:
             "sidetrack_window_inc_deg": 22.0,
             "sidetrack_window_azi_deg": 135.0,
             "sidetrack_lateral_md_m": 1450.0,
+            "sidetrack_complete_lateral_md_m": 1550.0,
+            "pilot_total_md_m": 200.0,
+            "md_total_m": 1670.0,
+            "sidetrack_total_md_m": 9999.0,
+            "total_drilled_footage_m": 1750.0,
         },
     )
 
@@ -1160,6 +1165,14 @@ def test_pilot_sidetrack_summary_df_reports_window_and_pilot_metrics() -> None:
     assert row["Плановых точек пилота"] == "2"
     assert row["BUILD+HOLD до точек пилота"] == "2"
     assert float(row["Окно MD, м"]) == pytest.approx(120.0)
+    assert float(row["MD пилота от устья до забоя, м"]) == pytest.approx(200.0)
+    assert float(row["MD бокового ствола от устья до забоя, м"]) == pytest.approx(
+        1670.0
+    )
+    assert float(row["Боковой ствол от окна до забоя, м"]) == pytest.approx(
+        1550.0
+    )
+    assert float(row["Суммарный метраж бурения, м"]) == pytest.approx(1750.0)
     assert float(row["Макс ПИ пилота, deg/10m"]) == pytest.approx(1.0)
 
 
@@ -1187,6 +1200,21 @@ def test_batch_summary_status_counts_classifies_rows() -> None:
 def test_has_md_postcheck_warning_detects_known_problem_text() -> None:
     assert ptc_batch_results.has_md_postcheck_warning(
         pd.DataFrame([{"Проблема": "Превышен лимит итоговой MD (постпроверка)."}])
+    )
+    assert ptc_batch_results.has_md_postcheck_warning(
+        pd.DataFrame(
+            [
+                {
+                    "Проблема": (
+                        "Превышен лимит MD бокового ствола от устья до забоя "
+                        "(постпроверка)."
+                    )
+                }
+            ]
+        )
+    )
+    assert not ptc_batch_results.has_md_postcheck_warning(
+        pd.DataFrame([{"Проблема": "Превышен лимит ПИ (постпроверка)."}])
     )
     assert not ptc_batch_results.has_md_postcheck_warning(
         pd.DataFrame([{"Проблема": ""}])

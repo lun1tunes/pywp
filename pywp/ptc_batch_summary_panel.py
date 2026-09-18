@@ -176,7 +176,7 @@ def render_batch_summary(
     render_small_note_func(f"Последний запуск: {state.get('wt_last_run_at', '—')}")
     if ptc_batch_results.has_md_postcheck_warning(summary_df):
         st_module.caption(
-            "Скважины с превышением лимита итоговой MD отображаются пунктирной "
+            "Скважины с превышением лимита MD отображаются пунктирной "
             "траекторией на графиках."
         )
 
@@ -276,11 +276,17 @@ def render_batch_summary(
                 "Окно AZI, deg": st_module.column_config.NumberColumn(
                     "Окно AZI, deg", format="%.2f", width="small"
                 ),
-                "MD пилота, м": st_module.column_config.NumberColumn(
+                "MD пилота от устья до забоя, м": st_module.column_config.NumberColumn(
                     "MD пилота, м", format="%.2f", width="small"
                 ),
-                "MD бокового ствола, м": st_module.column_config.NumberColumn(
+                "MD бокового ствола от устья до забоя, м": st_module.column_config.NumberColumn(
                     "MD бокового, м", format="%.2f", width="small"
+                ),
+                "Боковой ствол от окна до забоя, м": st_module.column_config.NumberColumn(
+                    "От окна до забоя, м", format="%.2f", width="small"
+                ),
+                "Суммарный метраж бурения, м": st_module.column_config.NumberColumn(
+                    "Метраж бурения, м", format="%.2f", width="small"
                 ),
                 "Макс ПИ пилота, deg/10m": st_module.column_config.NumberColumn(
                     "Макс ПИ пилота, deg/10m", format="%.2f", width="small"

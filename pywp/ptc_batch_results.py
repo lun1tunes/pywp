@@ -38,6 +38,7 @@ from pywp.ui_well_panels import (
     survey_source_coordinates,
 )
 from pywp.welltrack_batch import SuccessfulWellPlan
+from pywp.well_names import well_name_key
 
 __all__ = [
     "BATCH_SUMMARY_DISPLAY_ORDER",
@@ -1637,7 +1638,7 @@ def _sanitize_dev_export_rows(rows: pd.DataFrame) -> pd.DataFrame:
 
 
 def _well_name_key(name: object) -> str:
-    return str(name or "").strip().casefold()
+    return well_name_key(name or "")
 
 
 def _summary_optional_float(summary: dict[str, object], key: str) -> float | None:
@@ -1848,26 +1849,47 @@ def batch_summary_display_df(summary_df: pd.DataFrame) -> pd.DataFrame:
 def pilot_sidetrack_summary_df(
     successes: list[SuccessfulWellPlan],
 ) -> pd.DataFrame:
-    success_by_name = {str(success.name): success for success in successes}
+    success_by_name = {_well_name_key(success.name): success for success in successes}
     rows: list[dict[str, object]] = []
     for success in successes:
         summary = dict(success.summary)
         if str(summary.get("trajectory_type", "")).strip() != "PILOT_SIDETRACK":
             continue
         pilot_name = str(summary.get("pilot_well_name", "")).strip()
-        pilot_success = success_by_name.get(pilot_name)
+        pilot_success = success_by_name.get(_well_name_key(pilot_name))
         pilot_summary = dict(pilot_success.summary) if pilot_success is not None else {}
         pilot_target_count = _summary_float(
             pilot_summary.get("pilot_target_count"),
             fallback=_pilot_segment_count(pilot_success),
         )
+        window_md_m = _summary_float(summary.get("sidetrack_window_md_m"))
+        pilot_total_md_m = _summary_float(
+            summary.get("pilot_total_md_m"),
+            fallback=_summary_float(pilot_summary.get("md_total_m")),
+        )
+        lateral_from_window_md_m = _summary_float(
+            summary.get("sidetrack_complete_lateral_md_m"),
+            fallback=_summary_float(summary.get("sidetrack_lateral_md_m")),
+        )
+        sidetrack_total_md_m = _summary_float(summary.get("md_total_m"))
+        if not math.isfinite(sidetrack_total_md_m):
+            sidetrack_total_md_m = _summary_float(
+                summary.get("sidetrack_total_md_m")
+            )
+        if (
+            not math.isfinite(sidetrack_total_md_m)
+            and math.isfinite(window_md_m)
+            and math.isfinite(lateral_from_window_md_m)
+        ):
+            sidetrack_total_md_m = window_md_m + lateral_from_window_md_m
+        drilled_footage_m = _summary_float(summary.get("total_drilled_footage_m"))
         rows.append(
             {
                 "Скважина": str(success.name),
                 "Пилот": pilot_name or "—",
                 "Плановых точек пилота": _optional_int_text(pilot_target_count),
                 "BUILD+HOLD до точек пилота": _optional_int_text(pilot_target_count),
-                "Окно MD, м": _summary_float(summary.get("sidetrack_window_md_m")),
+                "Окно MD, м": window_md_m,
                 "Окно Z, м": _summary_float(summary.get("sidetrack_window_z_m")),
                 "Окно INC, deg": _summary_float(
                     summary.get("sidetrack_window_inc_deg")
@@ -1875,10 +1897,10 @@ def pilot_sidetrack_summary_df(
                 "Окно AZI, deg": _summary_float(
                     summary.get("sidetrack_window_azi_deg")
                 ),
-                "MD пилота, м": _summary_float(pilot_summary.get("md_total_m")),
-                "MD бокового ствола, м": _summary_float(
-                    summary.get("sidetrack_lateral_md_m")
-                ),
+                "MD пилота от устья до забоя, м": pilot_total_md_m,
+                "MD бокового ствола от устья до забоя, м": sidetrack_total_md_m,
+                "Боковой ствол от окна до забоя, м": lateral_from_window_md_m,
+                "Суммарный метраж бурения, м": drilled_footage_m,
                 "Макс ПИ пилота, deg/10m": dls_to_pi(
                     _summary_float(pilot_summary.get("max_dls_total_deg_per_30m"))
                 ),
@@ -1895,8 +1917,10 @@ def pilot_sidetrack_summary_df(
             "Окно Z, м",
             "Окно INC, deg",
             "Окно AZI, deg",
-            "MD пилота, м",
-            "MD бокового ствола, м",
+            "MD пилота от устья до забоя, м",
+            "MD бокового ствола от устья до забоя, м",
+            "Боковой ствол от окна до забоя, м",
+            "Суммарный метраж бурения, м",
             "Макс ПИ пилота, deg/10m",
         ],
     )
@@ -1937,7 +1961,10 @@ def has_md_postcheck_warning(summary_df: pd.DataFrame) -> bool:
     return bool(
         summary_df["Проблема"]
         .astype(str)
-        .str.contains("Превышен лимит итоговой MD", regex=False)
+        .str.contains(
+            r"Превышен лимит (?:итоговой MD|MD пилота|MD бокового ствола)",
+            regex=True,
+        )
         .any()
     )
 
@@ -1956,7 +1983,7 @@ def _pilot_segment_count(success: SuccessfulWellPlan | None) -> float:
 def _summary_float(value: object, *, fallback: float = float("nan")) -> float:
     try:
         numeric_value = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return fallback
     if not math.isfinite(numeric_value):
         return fallback

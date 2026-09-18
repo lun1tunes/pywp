@@ -2324,7 +2324,7 @@ def __dir__() -> list[str]:
     return sorted(set(globals()).union(__all__))
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/actual_fund_analysis.py	44497
+===BEGIN_FILE===	pywp/actual_fund_analysis.py	44487
 from __future__ import annotations
 
 import re
@@ -2339,6 +2339,7 @@ from pywp.mcm import add_dls, wrap_azimuth_deg
 from pywp.pydantic_base import FrozenArbitraryModel
 from pywp.reference_trajectories import ImportedTrajectoryWell
 from pywp.ui_utils import dls_to_pi
+from pywp.well_names import is_pilot_name
 
 HORIZONTAL_INC_THRESHOLD_DEG = 80.0
 HORIZONTAL_MIN_INTERVAL_M = 100.0
@@ -2493,8 +2494,7 @@ def actual_well_pad_group(name: object) -> str:
 
 
 def actual_well_is_pilot_name(name: object) -> bool:
-    label = str(name or "").strip().upper()
-    return bool(label.endswith("_PL"))
+    return is_pilot_name(name)
 
 
 def actual_well_is_horizontal(stations: pd.DataFrame) -> bool:
@@ -3850,7 +3850,7 @@ def format_precheck_summary_ru(result: AnalyticalPreCheckResult) -> str:
     return "\n".join(lines)
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/anticollision.py	145253
+===BEGIN_FILE===	pywp/anticollision.py	145286
 from __future__ import annotations
 
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
@@ -3877,6 +3877,7 @@ from pywp.uncertainty import (
     build_uncertainty_station_samples,
     local_uncertainty_axes_xyz,
 )
+from pywp.well_names import well_name_key
 
 TARGET_NONE = ""
 TARGET_T1 = "t1"
@@ -5911,7 +5912,7 @@ def _well_matches_sidetrack_parent(
 
 
 def _well_name_key(name: object) -> str:
-    return str(name).strip().casefold()
+    return well_name_key(name)
 
 
 def _sidetrack_parent_pair_overlap_corridors(
@@ -10005,7 +10006,7 @@ def _nullable_float(value: float | None) -> float | str:
     return float(value)
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/anticollision_rerun.py	62218
+===BEGIN_FILE===	pywp/anticollision_rerun.py	62200
 from __future__ import annotations
 
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
@@ -10153,7 +10154,7 @@ def _reference_wells_by_collision_name(
     planned_names: tuple[str, ...],
 ) -> dict[str, ImportedTrajectoryWell]:
     planned_name_keys = {
-        str(name).strip().casefold() for name in planned_names if str(name).strip()
+        well_name_key(name) for name in planned_names if str(name).strip()
     }
     duplicate_name_keys = reference_well_duplicate_name_keys(reference_wells)
     result: dict[str, ImportedTrajectoryWell] = {}
@@ -10164,7 +10165,7 @@ def _reference_wells_by_collision_name(
             duplicate_name_keys=duplicate_name_keys,
         )
         result[str(collision_name)] = item
-        item_key = str(item.name).strip().casefold()
+        item_key = well_name_key(item.name)
         if (
             str(item.name) not in result
             and item_key not in planned_name_keys
@@ -13658,7 +13659,7 @@ __all__ = [
 ]
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/eclipse_welltrack.py	34621
+===BEGIN_FILE===	pywp/eclipse_welltrack.py	38088
 from __future__ import annotations
 
 import math
@@ -13668,17 +13669,28 @@ from typing import Callable, Iterable, Literal, Mapping
 from pydantic import field_validator, model_validator
 from pywp.models import Point3D
 from pywp.pydantic_base import FrozenModel, coerce_model_like
+from pywp.well_names import (
+    is_alt_branch_name,
+    is_pilot_name,
+    is_zbs_name,
+    parent_name_for_pilot,
+    parent_name_for_zbs,
+    well_name_key,
+)
 
 _WELLTRACK_RE = re.compile(r"^\s*WELLTRACK\b(.*)$", flags=re.IGNORECASE)
 DEFAULT_WELLTRACK_ENCODINGS: tuple[str, ...] = ("utf-8", "cp1251", "latin-1")
 _MD_EPS = 1e-9
 _TABLE_POINT_ALIASES: dict[str, str] = {
     "s": "wellhead",
+    "s1": "wellhead",
+    "s_1": "wellhead",
     "surface": "wellhead",
     "wellhead": "wellhead",
     "well_head": "wellhead",
     "well head": "wellhead",
     "wh": "wellhead",
+    "pl": "pl1",
     "t1": "t1",
     "entry": "t1",
     "entry point": "t1",
@@ -13686,10 +13698,16 @@ _TABLE_POINT_ALIASES: dict[str, str] = {
     "target": "t3",
     "end": "t3",
 }
-_TABLE_PILOT_POINT_RE = re.compile(r"^(?:pl|p)([1-9]\d*)$", flags=re.IGNORECASE)
-_TABLE_TARGET_SEQUENCE_POINT_RE = re.compile(r"^t([1-9]\d*)$", flags=re.IGNORECASE)
+_TABLE_PILOT_POINT_RE = re.compile(
+    r"^(?:pl|p)_?([1-9]\d*)$",
+    flags=re.IGNORECASE,
+)
+_TABLE_TARGET_SEQUENCE_POINT_RE = re.compile(
+    r"^t_?([1-9]\d*)$",
+    flags=re.IGNORECASE,
+)
 _TABLE_MULTI_HORIZONTAL_POINT_RE = re.compile(
-    r"^([1-9]\d*)_t([13])$",
+    r"^([1-9]\d*)_?t_?([13])$",
     flags=re.IGNORECASE,
 )
 _TABLE_POINT_ORDER: tuple[str, ...] = ("wellhead", "t1", "t3")
@@ -13698,9 +13716,7 @@ _TABLE_POINT_DISPLAY_LABELS: dict[str, str] = {
     "t1": "t1",
     "t3": "t3",
 }
-_TABLE_PILOT_SUFFIX = "_PL"
-_TABLE_ZBS_SUFFIX = "_ZBS"
-_TABLE_ALT_BRANCH_SUFFIX = "_2"
+_TABLE_VALIDATION_ERROR_LIMIT = 50
 
 
 class WelltrackParseError(ValueError):
@@ -13843,7 +13859,11 @@ def parse_welltrack_points_table(
     rows: Iterable[Mapping[str, object]],
 ) -> list[WelltrackRecord]:
     grouped_points: dict[str, dict[str, WelltrackPoint]] = {}
+    point_row_numbers: dict[str, dict[str, int]] = {}
+    well_names: dict[str, str] = {}
+    well_row_numbers: dict[str, list[int]] = {}
     well_order: list[str] = []
+    validation_errors: list[str] = []
     has_non_empty_row = False
 
     for row_no, raw_row in enumerate(rows, start=1):
@@ -13859,38 +13879,75 @@ def parse_welltrack_points_table(
             continue
 
         has_non_empty_row = True
+        if _is_blank_table_value(name_raw):
+            validation_errors.append(
+                f"Строка {row_no}: поле Wellname пустое."
+            )
+            continue
         well_name = str(name_raw).strip()
         if not well_name:
-            raise WelltrackParseError(
-                f"Табличный WELLTRACK: пустое имя скважины в строке {row_no}."
+            validation_errors.append(
+                f"Строка {row_no}: поле Wellname пустое."
             )
+            continue
 
-        point_name = _normalize_table_point_name(
-            point_raw,
-            row_no=row_no,
-            allow_pilot_points=_is_table_pilot_well_name(well_name),
-        )
-        x = _coerce_table_float(x_raw, field_name="X", row_no=row_no)
-        y = _coerce_table_float(y_raw, field_name="Y", row_no=row_no)
-        z = _coerce_table_float(z_raw, field_name="Z", row_no=row_no)
-
-        if well_name not in grouped_points:
-            grouped_points[well_name] = {}
-            well_order.append(well_name)
-
-        if point_name in grouped_points[well_name]:
-            raise WelltrackParseError(
-                "Табличный WELLTRACK: дублирующаяся точка "
-                f"'{point_name}' для скважины '{well_name}' в строке {row_no}."
+        row_error_count = len(validation_errors)
+        point_name: str | None = None
+        try:
+            point_name = _normalize_table_point_name(
+                point_raw,
+                row_no=row_no,
+                well_name=well_name,
+                allow_pilot_points=_is_table_pilot_well_name(well_name),
             )
+        except WelltrackParseError as exc:
+            validation_errors.append(str(exc))
+
+        coordinates: dict[str, float] = {}
+        for field_name, raw_value in (("X", x_raw), ("Y", y_raw), ("Z", z_raw)):
+            try:
+                coordinates[field_name] = _coerce_table_float(
+                    raw_value,
+                    field_name=field_name,
+                    row_no=row_no,
+                    well_name=well_name,
+                    point_value=point_raw,
+                )
+            except WelltrackParseError as exc:
+                validation_errors.append(str(exc))
+        if len(validation_errors) != row_error_count or point_name is None:
+            continue
+
+        well_key = _table_well_name_key(well_name)
+        if well_key not in grouped_points:
+            grouped_points[well_key] = {}
+            point_row_numbers[well_key] = {}
+            well_names[well_key] = well_name
+            well_row_numbers[well_key] = []
+            well_order.append(well_key)
+        well_row_numbers[well_key].append(row_no)
+
+        if point_name in grouped_points[well_key]:
+            first_row_no = point_row_numbers[well_key][point_name]
+            validation_errors.append(
+                f"{_table_row_context(row_no, well_name, point_raw)}: точка "
+                f"'{_table_point_display_name(point_name)}' дублирует строку "
+                f"{first_row_no} той же скважины "
+                f"'{well_names[well_key]}'."
+            )
+            continue
 
         md_index = _table_point_md_index(point_name)
-        grouped_points[well_name][point_name] = WelltrackPoint(
-            x=x,
-            y=y,
-            z=z,
+        grouped_points[well_key][point_name] = WelltrackPoint(
+            x=coordinates["X"],
+            y=coordinates["Y"],
+            z=coordinates["Z"],
             md=md_index,
         )
+        point_row_numbers[well_key][point_name] = row_no
+
+    if validation_errors:
+        _raise_table_validation_errors(validation_errors)
 
     if not has_non_empty_row:
         raise WelltrackParseError(
@@ -13898,110 +13955,96 @@ def parse_welltrack_points_table(
             "Wellname / Point / X / Y / Z."
         )
 
-    pilot_surface_by_parent_key = _table_pilot_surface_by_parent_key(grouped_points)
+    grouped_points_by_name = {
+        well_names[well_key]: grouped_points[well_key]
+        for well_key in well_order
+    }
+    pilot_surface_by_parent_key = _table_pilot_surface_by_parent_key(
+        grouped_points_by_name
+    )
     records: list[WelltrackRecord] = []
-    for well_name in well_order:
-        points_by_name = _table_points_with_inferred_pilot_surface(
-            grouped_points[well_name],
+    structural_errors: list[str] = []
+    for well_key in well_order:
+        well_name = well_names[well_key]
+        try:
+            records.append(
+                _welltrack_record_from_table_points(
+                    grouped_points[well_key],
+                    well_name=well_name,
+                    pilot_surface_by_parent_key=pilot_surface_by_parent_key,
+                )
+            )
+        except WelltrackParseError as exc:
+            structural_errors.append(
+                _table_error_with_source_rows(
+                    str(exc),
+                    row_numbers=well_row_numbers[well_key],
+                )
+            )
+
+    if structural_errors:
+        _raise_table_validation_errors(structural_errors)
+
+    return records
+
+
+def _welltrack_record_from_table_points(
+    source_points_by_name: Mapping[str, WelltrackPoint],
+    *,
+    well_name: str,
+    pilot_surface_by_parent_key: Mapping[str, WelltrackPoint],
+) -> WelltrackRecord:
+    points_by_name = _table_points_with_inferred_pilot_surface(
+        source_points_by_name,
+        well_name=well_name,
+        pilot_surface_by_parent_key=pilot_surface_by_parent_key,
+    )
+    if _is_table_pilot_well_name(well_name):
+        ordered_names = _ordered_table_pilot_point_names(
+            points_by_name,
             well_name=well_name,
-            pilot_surface_by_parent_key=pilot_surface_by_parent_key,
         )
-        if _is_table_pilot_well_name(well_name):
-            ordered_names = _ordered_table_pilot_point_names(
-                points_by_name,
-                well_name=well_name,
-            )
-            ordered_points = _ordered_table_points(points_by_name, ordered_names)
-            _validate_record_md(points=list(ordered_points), well_name=well_name)
-            records.append(
-                WelltrackRecord(
-                    name=well_name,
-                    points=ordered_points,
-                    point_labels=tuple(
-                        _table_point_display_name(name) for name in ordered_names
-                    ),
-                )
-            )
-            continue
-
-        if _is_table_zbs_well_name(well_name) and (
-            not _is_table_alt_branch_well_name(well_name)
-            or "wellhead" not in points_by_name
-        ):
-            ordered_names = _ordered_table_zbs_point_names(
-                points_by_name,
-                well_name=well_name,
-            )
-            ordered_points = _ordered_table_points(points_by_name, ordered_names)
-            _validate_record_md(points=list(ordered_points), well_name=well_name)
-            records.append(
-                WelltrackRecord(
-                    name=well_name,
-                    points=ordered_points,
-                    point_labels=tuple(
-                        _table_point_display_name(name) for name in ordered_names
-                    ),
-                )
-            )
-            continue
-
+    elif _is_table_zbs_well_name(well_name) and (
+        not _is_table_alt_branch_well_name(well_name)
+        or "wellhead" not in points_by_name
+    ):
+        ordered_names = _ordered_table_zbs_point_names(
+            points_by_name,
+            well_name=well_name,
+        )
+    else:
         target_sequence_names = _ordered_table_target_sequence_point_names(
             points_by_name,
             well_name=well_name,
         )
         if target_sequence_names is not None:
-            ordered_points = _ordered_table_points(points_by_name, target_sequence_names)
-            _validate_record_md(points=list(ordered_points), well_name=well_name)
-            records.append(
-                WelltrackRecord(
-                    name=well_name,
-                    points=ordered_points,
-                    point_labels=tuple(
-                        _table_point_display_name(name)
-                        for name in target_sequence_names
-                    ),
-                )
-            )
-            continue
-
-        if _has_multi_horizontal_table_points(points_by_name):
+            ordered_names = target_sequence_names
+        elif _has_multi_horizontal_table_points(points_by_name):
             ordered_names = _ordered_table_multi_horizontal_point_names(
                 points_by_name,
                 well_name=well_name,
             )
-            ordered_points = _ordered_table_points(points_by_name, ordered_names)
-            _validate_record_md(points=list(ordered_points), well_name=well_name)
-            records.append(
-                WelltrackRecord(
-                    name=well_name,
-                    points=ordered_points,
-                    point_labels=tuple(
-                        _table_point_display_name(name) for name in ordered_names
-                    ),
+        else:
+            missing = [
+                name for name in _TABLE_POINT_ORDER if name not in points_by_name
+            ]
+            if missing:
+                raise WelltrackParseError(
+                    "Табличный WELLTRACK: для скважины "
+                    f"'{well_name}' отсутствуют точки: "
+                    f"{', '.join(_table_point_display_name(name) for name in missing)}."
                 )
-            )
-            continue
+            ordered_names = _TABLE_POINT_ORDER
 
-        missing = [name for name in _TABLE_POINT_ORDER if name not in points_by_name]
-        if missing:
-            raise WelltrackParseError(
-                "Табличный WELLTRACK: для скважины "
-                f"'{well_name}' отсутствуют точки: "
-                f"{', '.join(_table_point_display_name(name) for name in missing)}."
-            )
-        ordered_points = _ordered_table_points(points_by_name, _TABLE_POINT_ORDER)
-        _validate_record_md(points=list(ordered_points), well_name=well_name)
-        records.append(
-            WelltrackRecord(
-                name=well_name,
-                points=ordered_points,
-                point_labels=tuple(
-                    _table_point_display_name(name) for name in _TABLE_POINT_ORDER
-                ),
-            )
-        )
-
-    return records
+    ordered_points = _ordered_table_points(points_by_name, ordered_names)
+    _validate_record_md(points=list(ordered_points), well_name=well_name)
+    return WelltrackRecord(
+        name=well_name,
+        points=ordered_points,
+        point_labels=tuple(
+            _table_point_display_name(name) for name in ordered_names
+        ),
+    )
 
 
 def _ordered_table_points(
@@ -14137,6 +14180,84 @@ def _table_row_value(row: Mapping[str, object], *keys: str) -> object:
     return None
 
 
+def _table_row_context(
+    row_no: int,
+    well_name: object = "",
+    point_value: object = None,
+) -> str:
+    normalized_well_name = str(well_name).strip()
+    if not normalized_well_name:
+        return f"Строка {int(row_no)}"
+    if _is_blank_table_value(point_value):
+        return f"Строка {int(row_no)} (скважина '{normalized_well_name}')"
+    return (
+        f"Строка {int(row_no)} (скважина '{normalized_well_name}', "
+        f"Point={_table_value_repr(point_value)})"
+    )
+
+
+def _table_value_repr(value: object, *, max_length: int = 80) -> str:
+    rendered = repr(value)
+    if len(rendered) <= int(max_length):
+        return rendered
+    return f"{rendered[: max(int(max_length) - 3, 0)]}..."
+
+
+def _format_table_row_numbers(row_numbers: Iterable[int]) -> str:
+    numbers = sorted({int(row_no) for row_no in row_numbers})
+    if not numbers:
+        return "—"
+    ranges: list[str] = []
+    range_start = numbers[0]
+    range_end = numbers[0]
+    for number in numbers[1:]:
+        if number == range_end + 1:
+            range_end = number
+            continue
+        ranges.append(
+            str(range_start)
+            if range_start == range_end
+            else f"{range_start}-{range_end}"
+        )
+        range_start = range_end = number
+    ranges.append(
+        str(range_start)
+        if range_start == range_end
+        else f"{range_start}-{range_end}"
+    )
+    return ", ".join(ranges)
+
+
+def _table_error_with_source_rows(
+    message: str,
+    *,
+    row_numbers: Iterable[int],
+) -> str:
+    detail = str(message).strip()
+    if detail.endswith("."):
+        detail = detail[:-1]
+    return (
+        f"{detail}. Исходные строки этой скважины: "
+        f"{_format_table_row_numbers(row_numbers)}."
+    )
+
+
+def _raise_table_validation_errors(errors: Iterable[str]) -> None:
+    normalized_errors = [str(error).strip() for error in errors if str(error).strip()]
+    if not normalized_errors:
+        return
+    shown_errors = normalized_errors[:_TABLE_VALIDATION_ERROR_LIMIT]
+    lines = [
+        f"Таблица точек содержит ошибки ({len(normalized_errors)}):",
+        *(f"- {error}" for error in shown_errors),
+    ]
+    hidden_count = len(normalized_errors) - len(shown_errors)
+    if hidden_count > 0:
+        lines.append(f"- Ещё ошибок: {hidden_count}.")
+    lines.append("Исправьте указанные строки и повторите импорт.")
+    raise WelltrackParseError("\n".join(lines))
+
+
 def _normalize_table_row(row: Mapping[object, object]) -> dict[str, object]:
     normalized: dict[str, object] = {}
     for raw_key, value in row.items():
@@ -14152,57 +14273,72 @@ def _is_blank_table_value(value: object) -> bool:
         return True
     if isinstance(value, str):
         return not value.strip()
+    if type(value).__name__ in {"NAType", "NaTType"}:
+        return True
     return bool(math.isnan(value)) if isinstance(value, float) else False
+
+
+def normalize_welltrack_table_point_label(value: object) -> str | None:
+    """Return the canonical display label for a supported target-table point."""
+
+    point_name = _canonical_table_point_name(value)
+    return None if point_name is None else _table_point_display_name(point_name)
+
+
+def _canonical_table_point_name(value: object) -> str | None:
+    if _is_blank_table_value(value):
+        return None
+    normalized = str(value).strip().casefold()
+    point_name = _TABLE_POINT_ALIASES.get(normalized)
+    if point_name is not None:
+        return point_name
+    pilot_match = _TABLE_PILOT_POINT_RE.fullmatch(normalized)
+    if pilot_match is not None:
+        return f"pl{int(pilot_match.group(1))}"
+    target_sequence_match = _TABLE_TARGET_SEQUENCE_POINT_RE.fullmatch(normalized)
+    if target_sequence_match is not None:
+        return f"t{int(target_sequence_match.group(1))}"
+    multi_match = _TABLE_MULTI_HORIZONTAL_POINT_RE.fullmatch(normalized)
+    if multi_match is not None:
+        return f"{int(multi_match.group(1))}_t{int(multi_match.group(2))}"
+    return None
 
 
 def _normalize_table_point_name(
     value: object,
     *,
     row_no: int,
+    well_name: str = "",
     allow_pilot_points: bool = False,
 ) -> str:
+    context = _table_row_context(row_no, well_name, value)
     if _is_blank_table_value(value):
         raise WelltrackParseError(
-            f"Табличный WELLTRACK: пустое значение Point в строке {row_no}."
+            f"{context}: поле Point пустое."
         )
-    normalized = str(value).strip().lower()
+    point_name = _canonical_table_point_name(value)
     if allow_pilot_points:
-        if _TABLE_POINT_ALIASES.get(normalized) == "wellhead":
-            return "wellhead"
-        pilot_match = _TABLE_PILOT_POINT_RE.match(normalized)
-        if pilot_match is not None:
-            return f"pl{int(pilot_match.group(1))}"
+        if point_name == "wellhead" or (
+            point_name is not None
+            and _TABLE_PILOT_POINT_RE.fullmatch(point_name) is not None
+        ):
+            return point_name
         raise WelltrackParseError(
-            "Табличный WELLTRACK: unsupported Point="
-            f"{value!r} в строке {row_no}. "
-            "Для пилота ожидается S, PL1, PL2, ..."
+            f"{context}: метка точки не поддерживается для пилота. "
+            "Ожидается S или S1, затем PL (то же, что PL1), PL2, ...; регистр и "
+            "подчёркивание перед номером не учитываются."
         )
 
-    point_name = _TABLE_POINT_ALIASES.get(normalized)
-    if point_name is not None:
+    if point_name is not None and _TABLE_PILOT_POINT_RE.fullmatch(point_name) is None:
         return point_name
-    target_sequence_match = _TABLE_TARGET_SEQUENCE_POINT_RE.match(normalized)
-    if target_sequence_match is not None:
-        return f"t{int(target_sequence_match.group(1))}"
-    multi_match = _TABLE_MULTI_HORIZONTAL_POINT_RE.match(normalized)
-    if multi_match is not None:
-        return f"{int(multi_match.group(1))}_t{int(multi_match.group(2))}"
-    if point_name is None:
-        raise WelltrackParseError(
-            "Табличный WELLTRACK: unsupported Point="
-            f"{value!r} в строке {row_no}. "
-            "Ожидается S, t1, t2, t3, ...; для многопластовой скважины "
-            "используйте пары 1_t1, 1_t3, 2_t1, 2_t3, ... "
-            "Для пилота используйте имя wellname_PL и точки S, PL1, PL2, ... "
-            "Для бокового ствола от факта используйте имя fact_well_name_ZBS "
-            "или fact_well_name_2 и точки t1, t3 без S; для многопластового "
-            "бокового ствола используйте 1_t1, 1_t3, 2_t1, 2_t3, ... без S. "
-            "Для ствола от пилота можно использовать имя wellname или "
-            "wellname_2 и задавать t1/t3, последовательность t1/t2/t3/... "
-            "или многопластовые пары 1_t1/1_t3, 2_t1/2_t3, ... . "
-            "Точку S можно задать явно или не задавать: если загружен "
-            "wellname_PL, система возьмёт её из пилота автоматически."
-        )
+    raise WelltrackParseError(
+        f"{context}: метка точки не поддерживается. "
+        "Ожидается S, t1, t2, t3, ... (S1 также допустимо); для "
+        "многопластовой скважины используйте пары 1_t1/1_t3, "
+        "2_t1/2_t3, ... . Метки PL/PL1, PL2, ... допустимы только для "
+        "скважины с суффиксом _PL или PL. Регистр и необязательные "
+        "подчёркивания не учитываются."
+    )
 
 
 def _table_point_display_name(point_name: str) -> str:
@@ -14234,27 +14370,23 @@ def _table_point_md_index(point_name: str) -> float:
 
 
 def _is_table_pilot_well_name(well_name: object) -> bool:
-    return str(well_name).strip().upper().endswith(_TABLE_PILOT_SUFFIX)
+    return is_pilot_name(well_name)
 
 
 def _is_table_zbs_well_name(well_name: object) -> bool:
-    label = str(well_name).strip().upper()
-    return label.endswith(_TABLE_ZBS_SUFFIX) or label.endswith(_TABLE_ALT_BRANCH_SUFFIX)
+    return is_zbs_name(well_name) or is_alt_branch_name(well_name)
 
 
 def _is_table_alt_branch_well_name(well_name: object) -> bool:
-    return str(well_name).strip().upper().endswith(_TABLE_ALT_BRANCH_SUFFIX)
+    return is_alt_branch_name(well_name)
 
 
 def _table_well_name_key(well_name: object) -> str:
-    return str(well_name).strip().casefold()
+    return well_name_key(well_name)
 
 
 def _table_parent_name_for_pilot_well_name(well_name: object) -> str:
-    text = str(well_name).strip()
-    if not _is_table_pilot_well_name(text):
-        return text
-    return text[: -len(_TABLE_PILOT_SUFFIX)]
+    return parent_name_for_pilot(well_name)
 
 
 def _table_pilot_parent_name_for_well_name(well_name: object) -> str:
@@ -14262,7 +14394,7 @@ def _table_pilot_parent_name_for_well_name(well_name: object) -> str:
     if _is_table_pilot_well_name(text):
         return _table_parent_name_for_pilot_well_name(text)
     if _is_table_alt_branch_well_name(text):
-        return text[: -len(_TABLE_ALT_BRANCH_SUFFIX)]
+        return parent_name_for_zbs(text)
     return text
 
 
@@ -14531,20 +14663,30 @@ def _ordered_table_multi_horizontal_point_names(
     return tuple(ordered)
 
 
-def _coerce_table_float(value: object, *, field_name: str, row_no: int) -> float:
+def _coerce_table_float(
+    value: object,
+    *,
+    field_name: str,
+    row_no: int,
+    well_name: str = "",
+    point_value: object = None,
+) -> float:
+    context = _table_row_context(row_no, well_name, point_value)
     if _is_blank_table_value(value):
         raise WelltrackParseError(
-            f"Табличный WELLTRACK: пустое значение {field_name} в строке {row_no}."
+            f"{context}: поле {field_name} пустое."
         )
     try:
         number = float(_normalize_table_float_text(value))
     except (TypeError, ValueError) as exc:
         raise WelltrackParseError(
-            f"Табличный WELLTRACK: {field_name} в строке {row_no} не является числом."
+            f"{context}: поле {field_name} должно быть числом; "
+            f"получено {_table_value_repr(value)}."
         ) from exc
     if not math.isfinite(number):
         raise WelltrackParseError(
-            f"Табличный WELLTRACK: {field_name} в строке {row_no} должно быть конечным числом."
+            f"{context}: поле {field_name} должно быть конечным числом; "
+            f"получено {_table_value_repr(value)}."
         )
     return number
 
@@ -15547,6 +15689,109 @@ def add_dls(df: pd.DataFrame) -> pd.DataFrame:
         )
     out["DLS_deg_per_30m"] = dls
     return out
+
+===END_FILE===
+===BEGIN_FILE===	pywp/md_metrics.py	3895
+from __future__ import annotations
+
+import math
+from collections.abc import Mapping
+
+
+MD_POSTCHECK_TOLERANCE_M = 1e-6
+_PILOT_TRAJECTORY_TYPES = frozenset({"PILOT"})
+_SIDETRACK_TRAJECTORY_TYPES = frozenset(
+    {
+        "PILOT_SIDETRACK",
+        "FACT_SIDETRACK",
+    }
+)
+
+
+def _finite_summary_float(
+    summary: Mapping[str, object],
+    key: str,
+) -> float | None:
+    try:
+        value = float(summary.get(key))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def md_total_display_label_ru(summary: Mapping[str, object]) -> str:
+    trajectory_type = str(summary.get("trajectory_type", "")).strip().upper()
+    if trajectory_type in _PILOT_TRAJECTORY_TYPES:
+        return "MD пилота от устья до забоя"
+    if trajectory_type in _SIDETRACK_TRAJECTORY_TYPES:
+        return "MD бокового ствола от устья до забоя"
+    return "Итоговая MD"
+
+
+def parent_bore_md_display_label_ru(summary: Mapping[str, object]) -> str:
+    trajectory_type = str(summary.get("trajectory_type", "")).strip().upper()
+    if trajectory_type == "FACT_SIDETRACK":
+        return "MD исходного ствола от устья до забоя"
+    return "MD пилота от устья до забоя"
+
+
+def md_postcheck_values(
+    summary: Mapping[str, object],
+) -> tuple[float | None, float | None, float]:
+    """Return the well MD, configured limit and excess used by postcheck.
+
+    ``md_total_m`` is always the measured depth of one bore from the wellhead
+    to its bottom. Drilled-footage metrics for pilot/sidetrack combinations
+    are intentionally excluded from this limit check.
+    """
+
+    trajectory_type = str(summary.get("trajectory_type", "")).strip().upper()
+    checked_md_m = _finite_summary_float(summary, "md_total_m")
+    if checked_md_m is not None and checked_md_m < 0.0:
+        checked_md_m = None
+    if checked_md_m is None and trajectory_type in _SIDETRACK_TRAJECTORY_TYPES:
+        checked_md_m = _finite_summary_float(summary, "sidetrack_total_md_m")
+    elif checked_md_m is None and trajectory_type in _PILOT_TRAJECTORY_TYPES:
+        checked_md_m = _finite_summary_float(summary, "pilot_total_md_m")
+    if checked_md_m is not None and checked_md_m < 0.0:
+        checked_md_m = None
+    md_limit_m = _finite_summary_float(summary, "max_total_md_postcheck_m")
+
+    if checked_md_m is not None and checked_md_m >= 0.0:
+        if md_limit_m is not None and md_limit_m > 0.0:
+            return checked_md_m, md_limit_m, max(0.0, checked_md_m - md_limit_m)
+        return checked_md_m, md_limit_m, 0.0
+
+    if trajectory_type in _SIDETRACK_TRAJECTORY_TYPES:
+        # Legacy sidetrack excess may have been computed from pilot + lateral.
+        # It cannot establish the final MD when the bore MD is unavailable.
+        return checked_md_m, md_limit_m, 0.0
+
+    reported_excess_m = _finite_summary_float(summary, "md_postcheck_excess_m")
+    excess_m = max(0.0, reported_excess_m or 0.0)
+    if excess_m <= MD_POSTCHECK_TOLERANCE_M:
+        return checked_md_m, md_limit_m, 0.0
+    if checked_md_m is None and md_limit_m is not None:
+        checked_md_m = md_limit_m + excess_m
+    if md_limit_m is None and checked_md_m is not None:
+        md_limit_m = max(0.0, checked_md_m - excess_m)
+    return checked_md_m, md_limit_m, excess_m
+
+
+def md_postcheck_issue_message_ru(summary: Mapping[str, object]) -> str:
+    checked_md_m, md_limit_m, excess_m = md_postcheck_values(summary)
+    if excess_m <= MD_POSTCHECK_TOLERANCE_M:
+        return ""
+
+    label = md_total_display_label_ru(summary)
+    subject = "итоговой MD" if label == "Итоговая MD" else label
+    if checked_md_m is None or md_limit_m is None:
+        return f"Превышен лимит {subject} (постпроверка): +{excess_m:.2f} м."
+    return (
+        f"Превышен лимит {subject} (постпроверка): "
+        f"{checked_md_m:.2f} м > {md_limit_m:.2f} м "
+        f"(+{excess_m:.2f} м)."
+    )
 
 ===END_FILE===
 ===BEGIN_FILE===	pywp/models.py	15262
@@ -18759,7 +19004,7 @@ def normalize_user_path_text(raw_path: object) -> str:
     return text
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/pilot_wells.py	94235
+===BEGIN_FILE===	pywp/pilot_wells.py	94428
 from __future__ import annotations
 
 import math
@@ -18771,6 +19016,7 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import least_squares
 
+import pywp.well_names as well_name_utils
 from pywp.anticollision_optimization import (
     AntiCollisionOptimizationContext,
     evaluate_stations_anti_collision_clearance,
@@ -18793,13 +19039,25 @@ from pywp.sidetrack_solver import SidetrackPlanner, SidetrackStart
 from pywp.trajectory import WellTrajectory
 from pywp.ui_utils import dls_to_pi
 
-PILOT_SUFFIX = "_PL"
-ZBS_SUFFIX = "_ZBS"
-ALT_BRANCH_SUFFIX = "_2"
+PILOT_SUFFIX = well_name_utils.PILOT_SUFFIX
+ZBS_SUFFIX = well_name_utils.ZBS_SUFFIX
+ALT_BRANCH_SUFFIX = well_name_utils.ALT_BRANCH_SUFFIX
 SIDETRACK_WINDOW_ABOVE_FIRST_TARGET_MIN_M = 50.0
 SIDETRACK_WINDOW_ABOVE_FIRST_TARGET_MAX_M = 100.0
-_SURFACE_POINT_LABELS = {"s", "surface", "wellhead", "well_head", "well head", "wh"}
-_ZBS_MULTI_HORIZONTAL_LABEL_RE = re.compile(r"^[1-9]\d*_t[13]$", flags=re.IGNORECASE)
+_SURFACE_POINT_LABELS = {
+    "s",
+    "s1",
+    "s_1",
+    "surface",
+    "wellhead",
+    "well_head",
+    "well head",
+    "wh",
+}
+_ZBS_MULTI_HORIZONTAL_LABEL_RE = re.compile(
+    r"^[1-9]\d*_?t_?[13]$",
+    flags=re.IGNORECASE,
+)
 
 
 class PilotWindow(FrozenArbitraryModel):
@@ -18906,15 +19164,15 @@ class ReorientedPilotSidetrackPlan:
 
 
 def is_pilot_name(name: object) -> bool:
-    return str(name).strip().upper().endswith(PILOT_SUFFIX)
+    return well_name_utils.is_pilot_name(name)
 
 
 def is_zbs_name(name: object) -> bool:
-    return str(name).strip().upper().endswith(ZBS_SUFFIX)
+    return well_name_utils.is_zbs_name(name)
 
 
 def is_alt_branch_name(name: object) -> bool:
-    return str(name).strip().upper().endswith(ALT_BRANCH_SUFFIX)
+    return well_name_utils.is_alt_branch_name(name)
 
 
 def _record_point_labels(record: WelltrackRecord) -> tuple[str, ...]:
@@ -18938,10 +19196,7 @@ def _is_zbs_target_point_label(label: str) -> bool:
 
 
 def parent_name_for_pilot(name: object) -> str:
-    text = str(name).strip()
-    if not is_pilot_name(text):
-        return text
-    return text[: -len(PILOT_SUFFIX)]
+    return well_name_utils.parent_name_for_pilot(name)
 
 
 def pilot_parent_name_for_record(record: object) -> str:
@@ -18957,20 +19212,15 @@ def pilot_parent_name_for_record(record: object) -> str:
 
 
 def parent_name_for_zbs(name: object) -> str:
-    text = str(name).strip()
-    if is_zbs_name(text):
-        return text[: -len(ZBS_SUFFIX)]
-    if is_alt_branch_name(text):
-        return text[: -len(ALT_BRANCH_SUFFIX)]
-    return text
+    return well_name_utils.parent_name_for_zbs(name)
 
 
 def pilot_name_for_parent(name: object) -> str:
-    return f"{str(name).strip()}{PILOT_SUFFIX}"
+    return well_name_utils.pilot_name_for_parent(name)
 
 
 def well_name_key(name: object) -> str:
-    return str(name).strip().casefold()
+    return well_name_utils.well_name_key(name)
 
 
 def pilot_parent_key_for_record(name: object) -> str:
@@ -20044,6 +20294,8 @@ def combine_pilot_and_sidetrack(
     sidetrack_azimuth_deg = _finite_float_or_none(sidetrack_result.azimuth_deg)
     if sidetrack_azimuth_deg is None:
         raise ValueError("Азимут бокового ствола должен быть конечным числом.")
+    # Drilled footage is an optimization/work-volume metric, not the MD of
+    # either bore and therefore must never be used for the per-bore MD limit.
     total_drilled_md_m = pilot_total_md_m + sidetrack_lateral_md_m
     sidetrack_summary_max_dls = (
         _finite_float_or_none(summary.get("max_dls_total_deg_per_30m")) or 0.0
@@ -20068,18 +20320,20 @@ def combine_pilot_and_sidetrack(
             "sidetrack_window_azi_deg": float(window.azi_deg),
             "sidetrack_lateral_md_m": sidetrack_lateral_md_m,
             "sidetrack_complete_lateral_md_m": sidetrack_lateral_md_m,
+            "sidetrack_total_md_m": md_total_m,
             "pilot_total_md_m": pilot_total_md_m,
             "total_drilled_md_m": total_drilled_md_m,
+            "total_drilled_footage_m": total_drilled_md_m,
             "sidetrack_window_optimization_objective_m": total_drilled_md_m,
             "md_total_m": md_total_m,
             "max_total_md_postcheck_m": float(config.max_total_md_postcheck_m),
             "md_postcheck_excess_m": max(
                 0.0,
-                total_drilled_md_m - float(config.max_total_md_postcheck_m),
+                md_total_m - float(config.max_total_md_postcheck_m),
             ),
             "md_postcheck_exceeded": (
                 "yes"
-                if total_drilled_md_m > float(config.max_total_md_postcheck_m) + 1e-6
+                if md_total_m > float(config.max_total_md_postcheck_m) + 1e-6
                 else "no"
             ),
             "max_dls_total_deg_per_30m": max_dls,
@@ -30012,7 +30266,7 @@ def anticollision_focus_well_names(
     return tuple(sorted(related))
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_batch_results.py	68112
+===BEGIN_FILE===	pywp/ptc_batch_results.py	69435
 from __future__ import annotations
 
 import inspect
@@ -30053,6 +30307,7 @@ from pywp.ui_well_panels import (
     survey_source_coordinates,
 )
 from pywp.welltrack_batch import SuccessfulWellPlan
+from pywp.well_names import well_name_key
 
 __all__ = [
     "BATCH_SUMMARY_DISPLAY_ORDER",
@@ -31652,7 +31907,7 @@ def _sanitize_dev_export_rows(rows: pd.DataFrame) -> pd.DataFrame:
 
 
 def _well_name_key(name: object) -> str:
-    return str(name or "").strip().casefold()
+    return well_name_key(name or "")
 
 
 def _summary_optional_float(summary: dict[str, object], key: str) -> float | None:
@@ -31863,26 +32118,47 @@ def batch_summary_display_df(summary_df: pd.DataFrame) -> pd.DataFrame:
 def pilot_sidetrack_summary_df(
     successes: list[SuccessfulWellPlan],
 ) -> pd.DataFrame:
-    success_by_name = {str(success.name): success for success in successes}
+    success_by_name = {_well_name_key(success.name): success for success in successes}
     rows: list[dict[str, object]] = []
     for success in successes:
         summary = dict(success.summary)
         if str(summary.get("trajectory_type", "")).strip() != "PILOT_SIDETRACK":
             continue
         pilot_name = str(summary.get("pilot_well_name", "")).strip()
-        pilot_success = success_by_name.get(pilot_name)
+        pilot_success = success_by_name.get(_well_name_key(pilot_name))
         pilot_summary = dict(pilot_success.summary) if pilot_success is not None else {}
         pilot_target_count = _summary_float(
             pilot_summary.get("pilot_target_count"),
             fallback=_pilot_segment_count(pilot_success),
         )
+        window_md_m = _summary_float(summary.get("sidetrack_window_md_m"))
+        pilot_total_md_m = _summary_float(
+            summary.get("pilot_total_md_m"),
+            fallback=_summary_float(pilot_summary.get("md_total_m")),
+        )
+        lateral_from_window_md_m = _summary_float(
+            summary.get("sidetrack_complete_lateral_md_m"),
+            fallback=_summary_float(summary.get("sidetrack_lateral_md_m")),
+        )
+        sidetrack_total_md_m = _summary_float(summary.get("md_total_m"))
+        if not math.isfinite(sidetrack_total_md_m):
+            sidetrack_total_md_m = _summary_float(
+                summary.get("sidetrack_total_md_m")
+            )
+        if (
+            not math.isfinite(sidetrack_total_md_m)
+            and math.isfinite(window_md_m)
+            and math.isfinite(lateral_from_window_md_m)
+        ):
+            sidetrack_total_md_m = window_md_m + lateral_from_window_md_m
+        drilled_footage_m = _summary_float(summary.get("total_drilled_footage_m"))
         rows.append(
             {
                 "Скважина": str(success.name),
                 "Пилот": pilot_name or "—",
                 "Плановых точек пилота": _optional_int_text(pilot_target_count),
                 "BUILD+HOLD до точек пилота": _optional_int_text(pilot_target_count),
-                "Окно MD, м": _summary_float(summary.get("sidetrack_window_md_m")),
+                "Окно MD, м": window_md_m,
                 "Окно Z, м": _summary_float(summary.get("sidetrack_window_z_m")),
                 "Окно INC, deg": _summary_float(
                     summary.get("sidetrack_window_inc_deg")
@@ -31890,10 +32166,10 @@ def pilot_sidetrack_summary_df(
                 "Окно AZI, deg": _summary_float(
                     summary.get("sidetrack_window_azi_deg")
                 ),
-                "MD пилота, м": _summary_float(pilot_summary.get("md_total_m")),
-                "MD бокового ствола, м": _summary_float(
-                    summary.get("sidetrack_lateral_md_m")
-                ),
+                "MD пилота от устья до забоя, м": pilot_total_md_m,
+                "MD бокового ствола от устья до забоя, м": sidetrack_total_md_m,
+                "Боковой ствол от окна до забоя, м": lateral_from_window_md_m,
+                "Суммарный метраж бурения, м": drilled_footage_m,
                 "Макс ПИ пилота, deg/10m": dls_to_pi(
                     _summary_float(pilot_summary.get("max_dls_total_deg_per_30m"))
                 ),
@@ -31910,8 +32186,10 @@ def pilot_sidetrack_summary_df(
             "Окно Z, м",
             "Окно INC, deg",
             "Окно AZI, deg",
-            "MD пилота, м",
-            "MD бокового ствола, м",
+            "MD пилота от устья до забоя, м",
+            "MD бокового ствола от устья до забоя, м",
+            "Боковой ствол от окна до забоя, м",
+            "Суммарный метраж бурения, м",
             "Макс ПИ пилота, deg/10m",
         ],
     )
@@ -31952,7 +32230,10 @@ def has_md_postcheck_warning(summary_df: pd.DataFrame) -> bool:
     return bool(
         summary_df["Проблема"]
         .astype(str)
-        .str.contains("Превышен лимит итоговой MD", regex=False)
+        .str.contains(
+            r"Превышен лимит (?:итоговой MD|MD пилота|MD бокового ствола)",
+            regex=True,
+        )
         .any()
     )
 
@@ -31971,7 +32252,7 @@ def _pilot_segment_count(success: SuccessfulWellPlan | None) -> float:
 def _summary_float(value: object, *, fallback: float = float("nan")) -> float:
     try:
         numeric_value = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return fallback
     if not math.isfinite(numeric_value):
         return fallback
@@ -32867,7 +33148,7 @@ def run_batch_if_clicked(
         live_log_placeholder.empty()
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_batch_summary_panel.py	59087
+===BEGIN_FILE===	pywp/ptc_batch_summary_panel.py	59470
 from __future__ import annotations
 
 from collections.abc import Callable, MutableMapping
@@ -33046,7 +33327,7 @@ def render_batch_summary(
     render_small_note_func(f"Последний запуск: {state.get('wt_last_run_at', '—')}")
     if ptc_batch_results.has_md_postcheck_warning(summary_df):
         st_module.caption(
-            "Скважины с превышением лимита итоговой MD отображаются пунктирной "
+            "Скважины с превышением лимита MD отображаются пунктирной "
             "траекторией на графиках."
         )
 
@@ -33146,11 +33427,17 @@ def render_batch_summary(
                 "Окно AZI, deg": st_module.column_config.NumberColumn(
                     "Окно AZI, deg", format="%.2f", width="small"
                 ),
-                "MD пилота, м": st_module.column_config.NumberColumn(
+                "MD пилота от устья до забоя, м": st_module.column_config.NumberColumn(
                     "MD пилота, м", format="%.2f", width="small"
                 ),
-                "MD бокового ствола, м": st_module.column_config.NumberColumn(
+                "MD бокового ствола от устья до забоя, м": st_module.column_config.NumberColumn(
                     "MD бокового, м", format="%.2f", width="small"
+                ),
+                "Боковой ствол от окна до забоя, м": st_module.column_config.NumberColumn(
+                    "От окна до забоя, м", format="%.2f", width="small"
+                ),
+                "Суммарный метраж бурения, м": st_module.column_config.NumberColumn(
+                    "Метраж бурения, м", format="%.2f", width="small"
                 ),
                 "Макс ПИ пилота, deg/10m": st_module.column_config.NumberColumn(
                     "Макс ПИ пилота, deg/10m", format="%.2f", width="small"
@@ -34482,7 +34769,7 @@ def _as_selection_list(value: object) -> list[object]:
     return []
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_core.py	388704
+===BEGIN_FILE===	pywp/ptc_core.py	388774
 from __future__ import annotations
 
 import colorsys
@@ -41208,7 +41495,7 @@ def _render_target_table_help() -> None:
                 "Z": "Zpl2",
             },
         ],
-        "Пилот задаётся отдельной записью с тем же базовым именем и суффиксом `_PL`. Используйте точки `S`, `PL1`, `PL2`, ... без пропусков. Точек пилота может быть сколько угодно: от `PL1` до `PLN`.",
+        "Пилот задаётся отдельной записью с тем же базовым именем и суффиксом `_PL` или `PL`. Используйте точки `S`, `PL1`, `PL2`, ... без пропусков. Точек пилота может быть сколько угодно: от `PL1` до `PLN`.",
     )
     _render_example(
         "ЗБС от фактической скважины",
@@ -41613,7 +41900,8 @@ def _render_source_input() -> None:
         st.caption(
             "Вставьте из Excel колонки `Wellname`, `Point`, `X`, `Y`, `Z`. "
             "В колонке `Point`: `S` - устье скважины; обычная скважина - `S`, `t1`, `t3` "
-            "(две точки в пласте); несколько точек - `S`, `t1`, `t2`, `t3`, ... ."
+            "(две точки в пласте); несколько точек - `S`, `t1`, `t2`, `t3`, ... . "
+            "Допустимы `S` и `S1`; регистр меток не важен."
         )
         with st.expander(
             "Как задавать скважины с пилотом, ЗБС и многопластовые скважины",
@@ -51681,7 +51969,7 @@ def apply_editor_sidetrack_window_defaults(
         state.pop(SIDETRACK_EDITOR_OVERRIDES_KEY, None)
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_target_import.py	33779
+===BEGIN_FILE===	pywp/ptc_target_import.py	33450
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
@@ -51697,6 +51985,7 @@ from pywp.eclipse_welltrack import (
     WelltrackRecord,
     WelltrackParseError,
     decode_welltrack_bytes,
+    normalize_welltrack_table_point_label,
     parse_welltrack_points_table,
     parse_welltrack_text,
 )
@@ -51960,16 +52249,8 @@ def normalize_source_table_df_for_ui(table_df: pd.DataFrame | None) -> pd.DataFr
 
 
 def _normalize_source_table_point_value(value: object) -> object:
-    text = str(value).strip()
-    if text.lower() in {"wellhead", "s"}:
-        return "S"
-    multi_match = re.match(r"^([1-9]\d*)_t([13])$", text, flags=re.IGNORECASE)
-    if multi_match is not None:
-        return f"{int(multi_match.group(1))}_t{int(multi_match.group(2))}"
-    pilot_match = re.match(r"^pl([1-9]\d*)$", text, flags=re.IGNORECASE)
-    if pilot_match is not None:
-        return f"PL{int(pilot_match.group(1))}"
-    return value
+    normalized = normalize_welltrack_table_point_label(value)
+    return value if normalized is None else normalized
 
 
 def normalized_target_source_format(
@@ -52065,7 +52346,7 @@ def build_target_import_operation(
             progress_message="Разбор таблицы точек...",
             count_message_template="Собрано скважин из таблицы: {record_count}.",
             success_label_template="Импорт таблицы завершен за {elapsed_s:.2f} с",
-            error_label="Ошибка разбора табличного WELLTRACK",
+            error_label="Ошибка импорта таблицы точек",
             table_rows=pd.DataFrame(table_rows),
             parse_welltrack_text_func=parse_welltrack_text_func,
         )
@@ -52305,8 +52586,7 @@ def expand_single_column_source_table_df(table_df: pd.DataFrame) -> pd.DataFrame
     for raw_value in non_blank_values:
         tokens = [
             token.strip()
-            for token in re.split(r"[\t;]+", raw_value)
-            if token.strip()
+            for token in re.split(r"[\t;]", raw_value)
         ]
         if len(tokens) not in {5, 6}:
             return table_df
@@ -52373,7 +52653,7 @@ def _parse_dev_target_payload(
             continue
         assert parsed_item is not None
         record, summary, imported_well = parsed_item
-        well_key = str(imported_well.name).strip().casefold()
+        well_key = well_name_key(imported_well.name)
         if well_key in seen_success_keys:
             failures.append(
                 TargetImportFailure(
@@ -52509,7 +52789,7 @@ def dev_source_preview_well_names(
         normalized = str(raw_name).strip()
         if not normalized:
             return
-        key = normalized.casefold()
+        key = well_name_key(normalized)
         if key in seen:
             return
         seen.add(key)
@@ -53779,7 +54059,7 @@ def _value_is_finite(value: object) -> bool:
         return False
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_three_builders.py	80510
+===BEGIN_FILE===	pywp/ptc_three_builders.py	80528
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
@@ -53960,7 +54240,7 @@ def single_well_three_payload(
         }
     )
     for target_label, target_point in zip(target_labels, target_points, strict=False):
-        if str(target_label).strip().upper() == "S":
+        if str(target_label).strip().casefold() in {"s", "s1", "s_1"}:
             continue
         payload["labels"].append(
             _point_payload_label(
@@ -56185,7 +56465,7 @@ def _reference_pad_labels(reference_wells: Iterable[object]) -> list[_ReferenceP
     return pad_labels
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ptc_three_overrides.py	57424
+===BEGIN_FILE===	pywp/ptc_three_overrides.py	57437
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, MutableMapping
@@ -57268,7 +57548,7 @@ def _target_point_type(*, label: str, index: int) -> str:
         return "t1"
     if normalized == "t3" or normalized.endswith("_t3"):
         return "t3"
-    if index == 0 or normalized in {"s", "surface", "wellhead"}:
+    if index == 0 or normalized in {"s", "s1", "s_1", "surface", "wellhead"}:
         return "surface"
     if normalized.startswith("pl"):
         return "pilot"
@@ -58275,7 +58555,7 @@ def coerce_model_like(value: Any, model_cls: type[BaseModelT]) -> BaseModelT:
     return model_cls.model_validate(value, from_attributes=True)
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/reference_trajectories.py	25137
+===BEGIN_FILE===	pywp/reference_trajectories.py	25161
 from __future__ import annotations
 
 import math
@@ -58299,6 +58579,7 @@ from pywp.mcm import add_dls
 from pywp.models import Point3D
 from pywp.path_utils import normalize_user_path_text
 from pywp.pydantic_base import FrozenArbitraryModel
+from pywp.well_names import well_name_key
 
 REFERENCE_WELL_ACTUAL = "actual"
 REFERENCE_WELL_APPROVED = "approved"
@@ -58718,7 +58999,7 @@ def parse_reference_trajectory_dev_directories(
     seen_names: dict[str, Path] = {}
     for dev_file in dev_files:
         well_name = dev_file.stem
-        well_key = well_name.casefold()
+        well_key = well_name_key(well_name)
         previous_path = seen_names.get(well_key)
         if previous_path is not None:
             raise WelltrackParseError(
@@ -58858,7 +59139,7 @@ def reference_well_duplicate_name_keys(
 ) -> set[str]:
     name_counts: dict[str, int] = {}
     for well in wells:
-        key = str(well.name).strip().casefold()
+        key = well_name_key(well.name)
         if not key:
             continue
         name_counts[key] = int(name_counts.get(key, 0)) + 1
@@ -58872,9 +59153,9 @@ def reference_well_collision_name(
     duplicate_name_keys: set[str] | None = None,
 ) -> str:
     name = str(well.name)
-    name_key = name.strip().casefold()
+    name_key = well_name_key(name)
     planned_name_keys = {
-        str(item).strip().casefold()
+        well_name_key(item)
         for item in planned_names
         if str(item).strip()
     }
@@ -77988,7 +78269,7 @@ def render_survey_table_with_download(
         )
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ui_well_result.py	26179
+===BEGIN_FILE===	pywp/ui_well_result.py	27345
 from __future__ import annotations
 
 import math
@@ -77998,6 +78279,11 @@ import pandas as pd
 import streamlit as st
 from pydantic import field_validator
 
+from pywp.md_metrics import (
+    md_postcheck_issue_message_ru,
+    md_total_display_label_ru,
+    parent_bore_md_display_label_ru,
+)
 from pywp.models import Point3D, SummaryValue, TrajectoryConfig
 from pywp.planner_config import optimization_display_label
 from pywp.pydantic_base import FrozenArbitraryModel, coerce_model_like
@@ -78030,7 +78316,13 @@ SUMMARY_MAIN_METRICS: tuple[tuple[str, str], ...] = (
     ("max_dls_total_deg_per_30m", "Макс ПИ по стволу, deg/10m"),
     ("max_inc_actual_deg", "Макс INC фактический, deg"),
     ("max_inc_deg", "Макс INC лимит, deg"),
+    ("pilot_total_md_m", "MD пилота от устья до забоя, м"),
     ("md_total_m", "Итоговая MD, м"),
+    (
+        "sidetrack_complete_lateral_md_m",
+        "Боковой ствол от окна до забоя, м",
+    ),
+    ("total_drilled_footage_m", "Суммарный метраж бурения, м"),
     ("max_total_md_postcheck_m", "Лимит итоговой MD (постпроверка), м"),
 )
 
@@ -78059,6 +78351,8 @@ SUMMARY_TECH_HIDDEN_METRICS = frozenset(
         "t3_miss_dx_m",
         "t3_miss_dy_m",
         "t3_miss_dz_m",
+        "sidetrack_total_md_m",
+        "total_drilled_md_m",
     }
 )
 
@@ -78160,30 +78454,7 @@ def _summary_float_or_none(value: object) -> float | None:
 
 
 def md_postcheck_issue_message(summary: Mapping[str, float | str]) -> str:
-    md_postcheck_excess_m = (
-        _summary_float_or_none(summary.get("md_postcheck_excess_m")) or 0.0
-    )
-    if md_postcheck_excess_m <= 1e-6:
-        return ""
-    checked_md_m = _summary_float_or_none(summary.get("total_drilled_md_m"))
-    if checked_md_m is None:
-        checked_md_m = _summary_float_or_none(summary.get("md_total_m"))
-    md_limit_m = _summary_float_or_none(summary.get("max_total_md_postcheck_m"))
-    if checked_md_m is None and md_limit_m is not None:
-        checked_md_m = md_limit_m + md_postcheck_excess_m
-    if md_limit_m is None and checked_md_m is not None:
-        md_limit_m = max(0.0, checked_md_m - md_postcheck_excess_m)
-    if checked_md_m is None or md_limit_m is None:
-        return (
-            "Превышен лимит итоговой MD (постпроверка): "
-            f"+{md_postcheck_excess_m:.2f} м."
-        )
-    return (
-        "Превышен лимит итоговой MD (постпроверка): "
-        f"{checked_md_m:.2f} м > "
-        f"{md_limit_m:.2f} м "
-        f"(+{md_postcheck_excess_m:.2f} м)."
-    )
+    return md_postcheck_issue_message_ru(summary)
 
 
 def collect_issue_messages(
@@ -78303,6 +78574,45 @@ def build_key_metrics_rows(view: SingleWellResultView) -> list[dict[str, str]]:
     optimization_mode = str(summary.get("optimization_mode", view.config.optimization_mode))
     optimization_label = optimization_display_label(optimization_mode)
 
+    md_rows: list[dict[str, str]] = []
+    trajectory_type = str(summary.get("trajectory_type", "")).strip().upper()
+    if trajectory_type in {"PILOT_SIDETRACK", "FACT_SIDETRACK"}:
+        pilot_total_md_m = _summary_float_or_none(summary.get("pilot_total_md_m"))
+        if pilot_total_md_m is not None:
+            md_rows.append(
+                {
+                    "Показатель": parent_bore_md_display_label_ru(summary),
+                    "Значение": format_distance(pilot_total_md_m),
+                }
+            )
+    md_rows.append(
+        {
+            "Показатель": md_total_display_label_ru(summary),
+            "Значение": format_distance(float(summary["md_total_m"])),
+        }
+    )
+    if trajectory_type in {"PILOT_SIDETRACK", "FACT_SIDETRACK"}:
+        lateral_md_m = _summary_float_or_none(
+            summary.get("sidetrack_complete_lateral_md_m")
+        )
+        if lateral_md_m is not None:
+            md_rows.append(
+                {
+                    "Показатель": "Боковой ствол от окна до забоя",
+                    "Значение": format_distance(lateral_md_m),
+                }
+            )
+        drilled_footage_m = _summary_float_or_none(
+            summary.get("total_drilled_footage_m")
+        )
+        if drilled_footage_m is not None:
+            md_rows.append(
+                {
+                    "Показатель": "Суммарный метраж бурения",
+                    "Значение": format_distance(drilled_footage_m),
+                }
+            )
+
     rows = [
         {
             "Показатель": "Модель траектории",
@@ -78373,10 +78683,7 @@ def build_key_metrics_rows(view: SingleWellResultView) -> list[dict[str, str]]:
                 f"{float(summary['max_inc_deg']):.2f} deg"
             ),
         },
-        {
-            "Показатель": "Итоговая MD",
-            "Значение": format_distance(float(summary["md_total_m"])),
-        },
+        *md_rows,
         {
             "Показатель": "Рестарты решателя",
             "Значение": _format_solver_restart_text(summary),
@@ -78636,6 +78943,12 @@ def render_result_tables(
         for key, label in SUMMARY_MAIN_METRICS:
             if key not in summary_visible:
                 continue
+            if key == "md_total_m":
+                label = f"{md_total_display_label_ru(summary)}, м"
+            elif key == "pilot_total_md_m":
+                label = f"{parent_bore_md_display_label_ru(summary)}, м"
+            elif key == "max_total_md_postcheck_m":
+                label = f"Лимит {md_total_display_label_ru(summary)}, м"
             main_rows.append(
                 {
                     "Показатель": label,
@@ -81189,6 +81502,105 @@ def dls_figure(
     return fig
 
 ===END_FILE===
+===BEGIN_FILE===	pywp/well_names.py	2530
+from __future__ import annotations
+
+__all__ = [
+    "ALT_BRANCH_SUFFIX",
+    "PILOT_SUFFIX",
+    "ZBS_SUFFIX",
+    "is_alt_branch_name",
+    "is_pilot_name",
+    "is_zbs_name",
+    "parent_name_for_pilot",
+    "parent_name_for_zbs",
+    "pilot_name_for_parent",
+    "well_name_key",
+]
+
+PILOT_SUFFIX = "_PL"
+ZBS_SUFFIX = "_ZBS"
+ALT_BRANCH_SUFFIX = "_2"
+
+
+def _parent_for_optional_underscore_suffix(
+    name: object,
+    *,
+    suffix: str,
+) -> str | None:
+    text = str(name).strip()
+    folded = text.casefold()
+    bare_suffix = str(suffix).strip().lstrip("_").casefold()
+    separated_suffix = f"_{bare_suffix}"
+    if folded.endswith(separated_suffix):
+        parent = text[: -len(separated_suffix)]
+    elif folded.endswith(bare_suffix):
+        parent = text[: -len(bare_suffix)]
+    else:
+        return None
+    return parent if parent.strip() else None
+
+
+def is_pilot_name(name: object) -> bool:
+    return _parent_for_optional_underscore_suffix(
+        name,
+        suffix=PILOT_SUFFIX,
+    ) is not None
+
+
+def is_zbs_name(name: object) -> bool:
+    return _parent_for_optional_underscore_suffix(
+        name,
+        suffix=ZBS_SUFFIX,
+    ) is not None
+
+
+def is_alt_branch_name(name: object) -> bool:
+    text = str(name).strip()
+    return len(text) > len(ALT_BRANCH_SUFFIX) and text.endswith(ALT_BRANCH_SUFFIX)
+
+
+def parent_name_for_pilot(name: object) -> str:
+    text = str(name).strip()
+    return (
+        _parent_for_optional_underscore_suffix(text, suffix=PILOT_SUFFIX)
+        or text
+    )
+
+
+def parent_name_for_zbs(name: object) -> str:
+    text = str(name).strip()
+    zbs_parent = _parent_for_optional_underscore_suffix(text, suffix=ZBS_SUFFIX)
+    if zbs_parent is not None:
+        return zbs_parent
+    if is_alt_branch_name(text):
+        return text[: -len(ALT_BRANCH_SUFFIX)]
+    return text
+
+
+def pilot_name_for_parent(name: object) -> str:
+    return f"{str(name).strip()}{PILOT_SUFFIX}"
+
+
+def well_name_key(name: object) -> str:
+    """Return a case-insensitive key with compact suffixes canonicalized."""
+
+    text = str(name).strip()
+    pilot_parent = _parent_for_optional_underscore_suffix(
+        text,
+        suffix=PILOT_SUFFIX,
+    )
+    if pilot_parent is not None:
+        return f"{pilot_parent.strip().casefold()}{PILOT_SUFFIX.casefold()}"
+    zbs_parent = _parent_for_optional_underscore_suffix(
+        text,
+        suffix=ZBS_SUFFIX,
+    )
+    if zbs_parent is not None:
+        return f"{zbs_parent.strip().casefold()}{ZBS_SUFFIX.casefold()}"
+    return text.casefold()
+
+===END_FILE===
 ===BEGIN_FILE===	pywp/well_pad.py	17362
 from __future__ import annotations
 
@@ -81684,7 +82096,7 @@ def _vector_to_azimuth_deg(*, dx: float, dy: float) -> float:
     return float(math.degrees(math.atan2(float(dx), float(dy))) % 360.0)
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/welltrack_batch.py	124838
+===BEGIN_FILE===	pywp/welltrack_batch.py	125044
 from __future__ import annotations
 
 import logging
@@ -81734,6 +82146,7 @@ from pywp.models import (
     SummaryDict,
     TrajectoryConfig,
 )
+from pywp.md_metrics import md_postcheck_issue_message_ru
 from pywp.multi_horizontal import extend_plan_with_multi_horizontal_targets
 from pywp.parallel import calculation_budgeted, process_pool_context
 from pywp.pilot_wells import (
@@ -82478,21 +82891,9 @@ def _pilot_build_result_to_updated_success(
 
 def _postcheck_state(summary: Mapping[str, object]) -> tuple[bool, str]:
     messages: list[str] = []
-    md_total_m = _summary_float(summary, "total_drilled_md_m")
-    if md_total_m <= 0.0:
-        md_total_m = _summary_float(summary, "md_total_m")
-    md_limit_m = _summary_float(summary, "max_total_md_postcheck_m")
-    md_postcheck_excess_m = _summary_float(summary, "md_postcheck_excess_m")
-    if md_limit_m > 0.0 and md_total_m > md_limit_m:
-        md_postcheck_excess_m = max(
-            md_postcheck_excess_m,
-            md_total_m - md_limit_m,
-        )
-    if md_postcheck_excess_m > 1e-6:
-        messages.append(
-            "Превышен лимит итоговой MD (постпроверка): "
-            f"{md_total_m:.2f} м > {md_limit_m:.2f} м (+{md_postcheck_excess_m:.2f} м)."
-        )
+    md_message = md_postcheck_issue_message_ru(summary)
+    if md_message:
+        messages.append(md_message)
     dls_excess = _summary_float(summary, "dls_postcheck_excess_deg_per_30m")
     if dls_excess > 1e-6:
         max_dls = _summary_float(summary, "max_dls_total_deg_per_30m")
@@ -82607,6 +83008,18 @@ def _refresh_pilot_sidetrack_drilled_md_summary(
             md_total_m = station_md_total_m
     if not np.isfinite(md_total_m):
         md_total_m = 0.0
+    md_limit_m = float(config.max_total_md_postcheck_m)
+    refreshed.update(
+        {
+            "md_total_m": md_total_m,
+            "sidetrack_total_md_m": md_total_m,
+            "max_total_md_postcheck_m": md_limit_m,
+            "md_postcheck_excess_m": max(0.0, md_total_m - md_limit_m),
+            "md_postcheck_exceeded": (
+                "yes" if md_total_m > md_limit_m + 1e-6 else "no"
+            ),
+        }
+    )
     complete_lateral_md_m = md_total_m - window_md_m
     if (
         pilot_total_md_m <= 0.0
@@ -82652,26 +83065,28 @@ def _refresh_pilot_sidetrack_drilled_md_summary(
             # md_total_m may include later multi-target extensions; only use it
             # for legacy summaries without drilled-lateral metadata.
             sidetrack_lateral_md_m = complete_lateral_md_m
+    # Keep drilled footage separate from the final MD of the sidetrack bore.
     total_drilled_md_m = pilot_total_md_m + sidetrack_lateral_md_m
     sidetrack_complete_lateral_md_m = complete_lateral_md_m
     sidetrack_window_optimization_objective_m = (
         pilot_total_md_m + sidetrack_complete_lateral_md_m
     )
-    md_limit_m = float(config.max_total_md_postcheck_m)
     refreshed.update(
         {
             "sidetrack_lateral_md_m": sidetrack_lateral_md_m,
             "sidetrack_complete_lateral_md_m": sidetrack_complete_lateral_md_m,
             "pilot_total_md_m": pilot_total_md_m,
             "md_total_m": md_total_m,
+            "sidetrack_total_md_m": md_total_m,
             "total_drilled_md_m": total_drilled_md_m,
+            "total_drilled_footage_m": sidetrack_window_optimization_objective_m,
             "sidetrack_window_optimization_objective_m": (
                 sidetrack_window_optimization_objective_m
             ),
             "max_total_md_postcheck_m": md_limit_m,
-            "md_postcheck_excess_m": max(0.0, total_drilled_md_m - md_limit_m),
+            "md_postcheck_excess_m": max(0.0, md_total_m - md_limit_m),
             "md_postcheck_exceeded": (
-                "yes" if total_drilled_md_m > md_limit_m + 1e-6 else "no"
+                "yes" if md_total_m > md_limit_m + 1e-6 else "no"
             ),
         }
     )
@@ -84362,6 +84777,9 @@ class WelltrackBatchPlanner:
                             ),
                             "pilot_total_md_m": float(fallback.pilot.md_total_m),
                             "total_drilled_md_m": float(fallback.total_drilled_md_m),
+                            "total_drilled_footage_m": float(
+                                fallback.total_drilled_md_m
+                            ),
                             "sidetrack_window_optimization_objective_m": float(
                                 fallback.total_drilled_md_m
                             ),
@@ -84985,7 +85403,7 @@ def _offset_xy(*, surface: WelltrackPoint | Point3D, target: WelltrackPoint) -> 
     return float(math.hypot(dx, dy))
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/welltrack_targets.py	8384
+===BEGIN_FILE===	pywp/welltrack_targets.py	8563
 from __future__ import annotations
 
 import re
@@ -85004,13 +85422,18 @@ from pywp.pilot_wells import (
     zbs_multi_horizontal_level_count,
 )
 
-_TARGET_SEQUENCE_POINT_RE = re.compile(r"^t([1-9]\d*)$", flags=re.IGNORECASE)
+_TARGET_SEQUENCE_POINT_RE = re.compile(
+    r"^t_?([1-9]\d*)$",
+    flags=re.IGNORECASE,
+)
 _MULTI_HORIZONTAL_POINT_RE = re.compile(
-    r"^([1-9]\d*)_t([13])$",
+    r"^([1-9]\d*)_?t_?([13])$",
     flags=re.IGNORECASE,
 )
 _SURFACE_POINT_LABELS = {
     "s",
+    "s1",
+    "s_1",
     "surface",
     "wellhead",
     "well_head",
@@ -85228,13 +85651,18 @@ def _explicit_multi_horizontal_labels_are_valid(labels: tuple[str, ...]) -> bool
     matches = [_MULTI_HORIZONTAL_POINT_RE.fullmatch(label) for label in normalized]
     if any(match is None for match in matches) or len(normalized) % 2 != 0:
         return False
+    canonical = tuple(
+        f"{int(match.group(1))}_t{int(match.group(2))}"
+        for match in matches
+        if match is not None
+    )
     level_count = len(normalized) // 2
     expected = tuple(
         f"{level}_{suffix}"
         for level in range(1, level_count + 1)
         for suffix in ("t1", "t3")
     )
-    return normalized == expected
+    return canonical == expected
 
 ===END_FILE===
 ===BEGIN_FILE===	scripts/check_solver_baseline.py	6962

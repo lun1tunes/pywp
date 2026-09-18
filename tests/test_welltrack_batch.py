@@ -4394,6 +4394,7 @@ def test_refresh_pilot_sidetrack_drilled_md_summary_after_extension() -> None:
     assert refreshed["sidetrack_lateral_md_m"] == pytest.approx(400.0)
     assert refreshed["sidetrack_complete_lateral_md_m"] == pytest.approx(1200.0)
     assert refreshed["total_drilled_md_m"] == pytest.approx(1400.0)
+    assert refreshed["total_drilled_footage_m"] == pytest.approx(2200.0)
     assert refreshed["sidetrack_window_optimization_objective_m"] == pytest.approx(
         2200.0
     )
@@ -4427,6 +4428,7 @@ def test_refresh_pilot_sidetrack_drilled_md_summary_prefers_existing_lateral_md(
     assert refreshed["sidetrack_lateral_md_m"] == pytest.approx(450.0)
     assert refreshed["sidetrack_complete_lateral_md_m"] == pytest.approx(1200.0)
     assert refreshed["total_drilled_md_m"] == pytest.approx(1450.0)
+    assert refreshed["total_drilled_footage_m"] == pytest.approx(2200.0)
     assert refreshed["sidetrack_window_optimization_objective_m"] == pytest.approx(
         2200.0
     )
@@ -4478,6 +4480,7 @@ def test_refresh_pilot_sidetrack_drilled_md_summary_rejects_oversized_metadata()
     assert refreshed["sidetrack_lateral_md_m"] == pytest.approx(1200.0)
     assert refreshed["sidetrack_complete_lateral_md_m"] == pytest.approx(1200.0)
     assert refreshed["total_drilled_md_m"] == pytest.approx(2200.0)
+    assert refreshed["total_drilled_footage_m"] == pytest.approx(2200.0)
     assert refreshed["md_postcheck_exceeded"] == "no"
 
 
@@ -4531,8 +4534,9 @@ def test_refresh_pilot_sidetrack_drilled_md_summary_uses_station_md_fallback() -
         2200.0
     )
     assert refreshed["md_total_m"] == pytest.approx(1800.0)
-    assert refreshed["md_postcheck_excess_m"] == pytest.approx(200.0)
-    assert refreshed["md_postcheck_exceeded"] == "yes"
+    assert refreshed["sidetrack_total_md_m"] == pytest.approx(1800.0)
+    assert refreshed["md_postcheck_excess_m"] == pytest.approx(0.0)
+    assert refreshed["md_postcheck_exceeded"] == "no"
 
 
 def test_refresh_pilot_sidetrack_drilled_md_summary_prefers_station_md() -> None:
@@ -4561,7 +4565,7 @@ def test_refresh_pilot_sidetrack_drilled_md_summary_prefers_station_md() -> None
     )
 
 
-def test_postcheck_state_uses_total_drilled_md_for_pilot_sidetrack() -> None:
+def test_postcheck_state_uses_sidetrack_md_from_wellhead() -> None:
     exceeded, message = _postcheck_state(
         {
             "trajectory_type": "PILOT_SIDETRACK",
@@ -4572,8 +4576,24 @@ def test_postcheck_state_uses_total_drilled_md_for_pilot_sidetrack() -> None:
         }
     )
 
+    assert exceeded is False
+    assert message == ""
+
+
+def test_postcheck_state_reports_sidetrack_md_excess_independently() -> None:
+    exceeded, message = _postcheck_state(
+        {
+            "trajectory_type": "PILOT_SIDETRACK",
+            "md_total_m": 1300.0,
+            "total_drilled_md_m": 1800.0,
+            "max_total_md_postcheck_m": 1200.0,
+            "md_postcheck_excess_m": 600.0,
+        }
+    )
+
     assert exceeded is True
-    assert "1500.00 м > 1200.00 м" in message
+    assert "MD бокового ствола от устья до забоя" in message
+    assert "1300.00 м > 1200.00 м (+100.00 м)" in message
 
 
 def test_batch_planner_keeps_existing_pilot_when_updated_sidetrack_rejected(

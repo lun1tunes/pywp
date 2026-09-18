@@ -1080,7 +1080,7 @@ def _target_point_type(*, label: str, index: int) -> str:
         return "t1"
     if normalized == "t3" or normalized.endswith("_t3"):
         return "t3"
-    if index == 0 or normalized in {"s", "surface", "wellhead"}:
+    if index == 0 or normalized in {"s", "s1", "s_1", "surface", "wellhead"}:
         return "surface"
     if normalized.startswith("pl"):
         return "pilot"

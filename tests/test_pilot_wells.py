@@ -12,6 +12,7 @@ from pywp.pilot_wells import (
     SidetrackWindowOverride,
     build_pilot_trajectory,
     combine_pilot_and_sidetrack,
+    is_zbs_name,
     is_zbs_record,
     is_pilot_name,
     order_records_with_pilots_first,
@@ -22,6 +23,7 @@ from pywp.pilot_wells import (
     plan_reoriented_pilot_sidetrack_fallback,
     select_sidetrack_window,
     sync_pilot_surfaces_to_parents,
+    well_name_key,
 )
 from pywp import pilot_wells
 from pywp.planner_types import PlanningError
@@ -36,9 +38,17 @@ from pywp.uncertainty import (
 def test_pilot_name_helpers() -> None:
     assert is_pilot_name("well_04_PL")
     assert is_pilot_name("well_04_pl")
+    assert is_pilot_name("201PL")
+    assert not is_pilot_name("PL")
     assert parent_name_for_pilot("well_04_PL") == "well_04"
+    assert parent_name_for_pilot("201pL") == "201"
+    assert well_name_key("201PL") == well_name_key("201_PL") == "201_pl"
+    assert is_zbs_name("201ZBS")
+    assert parent_name_for_zbs("201zbs") == "201"
+    assert well_name_key("201ZBS") == well_name_key("201_ZBS") == "201_zbs"
     assert paired_pilot_parent_names("well_04", "well_04_PL")
     assert paired_pilot_parent_names("well_04", "WELL_04_pl")
+    assert paired_pilot_parent_names("201", "201PL")
     assert paired_pilot_parent_names("well_04_2", "well_04_PL")
     assert not paired_pilot_parent_names("well_04", "well_05_PL")
 
@@ -1448,7 +1458,7 @@ def test_sidetrack_geometry_seed_falls_back_when_standalone_seed_is_malformed(
 
 
 def test_combine_pilot_and_sidetrack_uses_station_md_for_lateral_length() -> None:
-    config = TrajectoryConfig(max_total_md_postcheck_m=1000.0)
+    config = TrajectoryConfig(max_total_md_postcheck_m=500.0)
     pilot_stations = pd.DataFrame(
         {
             "MD_m": [0.0, 100.0, 500.0],
@@ -1499,10 +1509,14 @@ def test_combine_pilot_and_sidetrack_uses_station_md_for_lateral_length() -> Non
     assert sidetrack.summary["sidetrack_lateral_md_m"] == pytest.approx(240.0)
     assert sidetrack.summary["pilot_total_md_m"] == pytest.approx(500.0)
     assert sidetrack.summary["total_drilled_md_m"] == pytest.approx(740.0)
+    assert sidetrack.summary["total_drilled_footage_m"] == pytest.approx(740.0)
     assert sidetrack.summary["sidetrack_window_optimization_objective_m"] == (
         pytest.approx(740.0)
     )
     assert sidetrack.summary["md_total_m"] == pytest.approx(340.0)
+    assert sidetrack.summary["sidetrack_total_md_m"] == pytest.approx(340.0)
+    assert sidetrack.summary["md_postcheck_excess_m"] == pytest.approx(0.0)
+    assert sidetrack.summary["md_postcheck_exceeded"] == "no"
     assert sidetrack.summary["kop_md_m"] == pytest.approx(100.0)
     assert sidetrack.summary["max_dls_total_deg_per_30m"] >= 0.0
 

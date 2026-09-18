@@ -145,7 +145,7 @@ def _reference_wells_by_collision_name(
     planned_names: tuple[str, ...],
 ) -> dict[str, ImportedTrajectoryWell]:
     planned_name_keys = {
-        str(name).strip().casefold() for name in planned_names if str(name).strip()
+        well_name_key(name) for name in planned_names if str(name).strip()
     }
     duplicate_name_keys = reference_well_duplicate_name_keys(reference_wells)
     result: dict[str, ImportedTrajectoryWell] = {}
@@ -156,7 +156,7 @@ def _reference_wells_by_collision_name(
             duplicate_name_keys=duplicate_name_keys,
         )
         result[str(collision_name)] = item
-        item_key = str(item.name).strip().casefold()
+        item_key = well_name_key(item.name)
         if (
             str(item.name) not in result
             and item_key not in planned_name_keys

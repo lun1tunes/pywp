@@ -118,6 +118,40 @@ def test_normalize_source_table_df_accepts_aliases_and_surface_names() -> None:
     assert list(normalized["X"]) == [10.0, 11.0]
 
 
+def test_normalize_source_table_df_canonicalizes_flexible_point_labels() -> None:
+    normalized = target_import.normalize_source_table_df_for_ui(
+        pd.DataFrame(
+            {
+                "Wellname": ["A"] * 8,
+                "Point": [
+                    "s1",
+                    "T_2",
+                    "PL",
+                    "pl_3",
+                    "1T1",
+                    "2_t_3",
+                    "unknown",
+                    None,
+                ],
+                "X": [0.0] * 8,
+                "Y": [0.0] * 8,
+                "Z": [0.0] * 8,
+            }
+        )
+    )
+
+    assert list(normalized["Point"].iloc[:7]) == [
+        "S",
+        "t2",
+        "PL1",
+        "PL3",
+        "1_t1",
+        "2_t3",
+        "unknown",
+    ]
+    assert pd.isna(normalized["Point"].iloc[7])
+
+
 def test_normalize_source_table_df_accepts_excel_like_single_column_rows() -> None:
     normalized = target_import.normalize_source_table_df_for_ui(
         pd.DataFrame(
@@ -134,6 +168,34 @@ def test_normalize_source_table_df_accepts_excel_like_single_column_rows() -> No
     assert normalized.iloc[0].to_dict()["Point"] == "S"
     assert str(normalized.iloc[1]["X"]) == "600,5"
     assert list(normalized.columns) == ["Wellname", "Point", "X", "Y", "Z"]
+
+
+def test_normalize_source_table_df_preserves_blank_excel_cells() -> None:
+    normalized = target_import.normalize_source_table_df_for_ui(
+        pd.DataFrame(
+            {
+                "Column 1": [
+                    "TAB-01\tT1\t\t800\t2400",
+                    "TAB-01;t3;1500;;2500",
+                ]
+            }
+        )
+    )
+
+    assert normalized.iloc[0].to_dict() == {
+        "Wellname": "TAB-01",
+        "Point": "t1",
+        "X": "",
+        "Y": "800",
+        "Z": "2400",
+    }
+    assert normalized.iloc[1].to_dict() == {
+        "Wellname": "TAB-01",
+        "Point": "t3",
+        "X": "1500",
+        "Y": "",
+        "Z": "2500",
+    }
 
 
 def test_normalize_source_table_df_resets_non_range_index_for_dynamic_editor() -> (
@@ -356,9 +418,12 @@ def test_target_import_operation_treats_three_point_dev_as_plain_target() -> Non
     )
 
 
-def test_target_import_operation_parses_pilot_dev_with_pl_points() -> None:
+@pytest.mark.parametrize("pilot_name", ["WELL-04_PL", "WELL-04PL", "well-04pl"])
+def test_target_import_operation_parses_pilot_dev_with_pl_points(
+    pilot_name: str,
+) -> None:
     dev_text = _inline_dev_text(
-        "WELL-04_PL",
+        pilot_name,
         [
             (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
             (300.0, 0.0, 0.0, -300.0, 300.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
@@ -384,7 +449,7 @@ def test_target_import_operation_parses_pilot_dev_with_pl_points() -> None:
 
     parsed = operation.parse()
 
-    assert [record.name for record in parsed.records] == ["WELL-04_PL"]
+    assert [record.name for record in parsed.records] == [pilot_name]
     assert len(parsed.dev_summaries) == 1
     record = parsed.records[0]
     assert record.point_labels == ("S", "PL1", "PL2")

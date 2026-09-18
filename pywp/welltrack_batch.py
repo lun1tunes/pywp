@@ -47,6 +47,7 @@ from pywp.models import (
     SummaryDict,
     TrajectoryConfig,
 )
+from pywp.md_metrics import md_postcheck_issue_message_ru
 from pywp.multi_horizontal import extend_plan_with_multi_horizontal_targets
 from pywp.parallel import calculation_budgeted, process_pool_context
 from pywp.pilot_wells import (
@@ -791,21 +792,9 @@ def _pilot_build_result_to_updated_success(
 
 def _postcheck_state(summary: Mapping[str, object]) -> tuple[bool, str]:
     messages: list[str] = []
-    md_total_m = _summary_float(summary, "total_drilled_md_m")
-    if md_total_m <= 0.0:
-        md_total_m = _summary_float(summary, "md_total_m")
-    md_limit_m = _summary_float(summary, "max_total_md_postcheck_m")
-    md_postcheck_excess_m = _summary_float(summary, "md_postcheck_excess_m")
-    if md_limit_m > 0.0 and md_total_m > md_limit_m:
-        md_postcheck_excess_m = max(
-            md_postcheck_excess_m,
-            md_total_m - md_limit_m,
-        )
-    if md_postcheck_excess_m > 1e-6:
-        messages.append(
-            "Превышен лимит итоговой MD (постпроверка): "
-            f"{md_total_m:.2f} м > {md_limit_m:.2f} м (+{md_postcheck_excess_m:.2f} м)."
-        )
+    md_message = md_postcheck_issue_message_ru(summary)
+    if md_message:
+        messages.append(md_message)
     dls_excess = _summary_float(summary, "dls_postcheck_excess_deg_per_30m")
     if dls_excess > 1e-6:
         max_dls = _summary_float(summary, "max_dls_total_deg_per_30m")
@@ -920,6 +909,18 @@ def _refresh_pilot_sidetrack_drilled_md_summary(
             md_total_m = station_md_total_m
     if not np.isfinite(md_total_m):
         md_total_m = 0.0
+    md_limit_m = float(config.max_total_md_postcheck_m)
+    refreshed.update(
+        {
+            "md_total_m": md_total_m,
+            "sidetrack_total_md_m": md_total_m,
+            "max_total_md_postcheck_m": md_limit_m,
+            "md_postcheck_excess_m": max(0.0, md_total_m - md_limit_m),
+            "md_postcheck_exceeded": (
+                "yes" if md_total_m > md_limit_m + 1e-6 else "no"
+            ),
+        }
+    )
     complete_lateral_md_m = md_total_m - window_md_m
     if (
         pilot_total_md_m <= 0.0
@@ -965,26 +966,28 @@ def _refresh_pilot_sidetrack_drilled_md_summary(
             # md_total_m may include later multi-target extensions; only use it
             # for legacy summaries without drilled-lateral metadata.
             sidetrack_lateral_md_m = complete_lateral_md_m
+    # Keep drilled footage separate from the final MD of the sidetrack bore.
     total_drilled_md_m = pilot_total_md_m + sidetrack_lateral_md_m
     sidetrack_complete_lateral_md_m = complete_lateral_md_m
     sidetrack_window_optimization_objective_m = (
         pilot_total_md_m + sidetrack_complete_lateral_md_m
     )
-    md_limit_m = float(config.max_total_md_postcheck_m)
     refreshed.update(
         {
             "sidetrack_lateral_md_m": sidetrack_lateral_md_m,
             "sidetrack_complete_lateral_md_m": sidetrack_complete_lateral_md_m,
             "pilot_total_md_m": pilot_total_md_m,
             "md_total_m": md_total_m,
+            "sidetrack_total_md_m": md_total_m,
             "total_drilled_md_m": total_drilled_md_m,
+            "total_drilled_footage_m": sidetrack_window_optimization_objective_m,
             "sidetrack_window_optimization_objective_m": (
                 sidetrack_window_optimization_objective_m
             ),
             "max_total_md_postcheck_m": md_limit_m,
-            "md_postcheck_excess_m": max(0.0, total_drilled_md_m - md_limit_m),
+            "md_postcheck_excess_m": max(0.0, md_total_m - md_limit_m),
             "md_postcheck_exceeded": (
-                "yes" if total_drilled_md_m > md_limit_m + 1e-6 else "no"
+                "yes" if md_total_m > md_limit_m + 1e-6 else "no"
             ),
         }
     )
@@ -2675,6 +2678,9 @@ class WelltrackBatchPlanner:
                             ),
                             "pilot_total_md_m": float(fallback.pilot.md_total_m),
                             "total_drilled_md_m": float(fallback.total_drilled_md_m),
+                            "total_drilled_footage_m": float(
+                                fallback.total_drilled_md_m
+                            ),
                             "sidetrack_window_optimization_objective_m": float(
                                 fallback.total_drilled_md_m
                             ),

@@ -24,6 +24,7 @@ from pywp.uncertainty import (
     build_uncertainty_station_samples,
     local_uncertainty_axes_xyz,
 )
+from pywp.well_names import well_name_key
 
 TARGET_NONE = ""
 TARGET_T1 = "t1"
@@ -2058,7 +2059,7 @@ def _well_matches_sidetrack_parent(
 
 
 def _well_name_key(name: object) -> str:
-    return str(name).strip().casefold()
+    return well_name_key(name)
 
 
 def _sidetrack_parent_pair_overlap_corridors(

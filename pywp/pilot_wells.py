@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import least_squares
 
+import pywp.well_names as well_name_utils
 from pywp.anticollision_optimization import (
     AntiCollisionOptimizationContext,
     evaluate_stations_anti_collision_clearance,
@@ -31,13 +32,25 @@ from pywp.sidetrack_solver import SidetrackPlanner, SidetrackStart
 from pywp.trajectory import WellTrajectory
 from pywp.ui_utils import dls_to_pi
 
-PILOT_SUFFIX = "_PL"
-ZBS_SUFFIX = "_ZBS"
-ALT_BRANCH_SUFFIX = "_2"
+PILOT_SUFFIX = well_name_utils.PILOT_SUFFIX
+ZBS_SUFFIX = well_name_utils.ZBS_SUFFIX
+ALT_BRANCH_SUFFIX = well_name_utils.ALT_BRANCH_SUFFIX
 SIDETRACK_WINDOW_ABOVE_FIRST_TARGET_MIN_M = 50.0
 SIDETRACK_WINDOW_ABOVE_FIRST_TARGET_MAX_M = 100.0
-_SURFACE_POINT_LABELS = {"s", "surface", "wellhead", "well_head", "well head", "wh"}
-_ZBS_MULTI_HORIZONTAL_LABEL_RE = re.compile(r"^[1-9]\d*_t[13]$", flags=re.IGNORECASE)
+_SURFACE_POINT_LABELS = {
+    "s",
+    "s1",
+    "s_1",
+    "surface",
+    "wellhead",
+    "well_head",
+    "well head",
+    "wh",
+}
+_ZBS_MULTI_HORIZONTAL_LABEL_RE = re.compile(
+    r"^[1-9]\d*_?t_?[13]$",
+    flags=re.IGNORECASE,
+)
 
 
 class PilotWindow(FrozenArbitraryModel):
@@ -144,15 +157,15 @@ class ReorientedPilotSidetrackPlan:
 
 
 def is_pilot_name(name: object) -> bool:
-    return str(name).strip().upper().endswith(PILOT_SUFFIX)
+    return well_name_utils.is_pilot_name(name)
 
 
 def is_zbs_name(name: object) -> bool:
-    return str(name).strip().upper().endswith(ZBS_SUFFIX)
+    return well_name_utils.is_zbs_name(name)
 
 
 def is_alt_branch_name(name: object) -> bool:
-    return str(name).strip().upper().endswith(ALT_BRANCH_SUFFIX)
+    return well_name_utils.is_alt_branch_name(name)
 
 
 def _record_point_labels(record: WelltrackRecord) -> tuple[str, ...]:
@@ -176,10 +189,7 @@ def _is_zbs_target_point_label(label: str) -> bool:
 
 
 def parent_name_for_pilot(name: object) -> str:
-    text = str(name).strip()
-    if not is_pilot_name(text):
-        return text
-    return text[: -len(PILOT_SUFFIX)]
+    return well_name_utils.parent_name_for_pilot(name)
 
 
 def pilot_parent_name_for_record(record: object) -> str:
@@ -195,20 +205,15 @@ def pilot_parent_name_for_record(record: object) -> str:
 
 
 def parent_name_for_zbs(name: object) -> str:
-    text = str(name).strip()
-    if is_zbs_name(text):
-        return text[: -len(ZBS_SUFFIX)]
-    if is_alt_branch_name(text):
-        return text[: -len(ALT_BRANCH_SUFFIX)]
-    return text
+    return well_name_utils.parent_name_for_zbs(name)
 
 
 def pilot_name_for_parent(name: object) -> str:
-    return f"{str(name).strip()}{PILOT_SUFFIX}"
+    return well_name_utils.pilot_name_for_parent(name)
 
 
 def well_name_key(name: object) -> str:
-    return str(name).strip().casefold()
+    return well_name_utils.well_name_key(name)
 
 
 def pilot_parent_key_for_record(name: object) -> str:
@@ -1282,6 +1287,8 @@ def combine_pilot_and_sidetrack(
     sidetrack_azimuth_deg = _finite_float_or_none(sidetrack_result.azimuth_deg)
     if sidetrack_azimuth_deg is None:
         raise ValueError("Азимут бокового ствола должен быть конечным числом.")
+    # Drilled footage is an optimization/work-volume metric, not the MD of
+    # either bore and therefore must never be used for the per-bore MD limit.
     total_drilled_md_m = pilot_total_md_m + sidetrack_lateral_md_m
     sidetrack_summary_max_dls = (
         _finite_float_or_none(summary.get("max_dls_total_deg_per_30m")) or 0.0
@@ -1306,18 +1313,20 @@ def combine_pilot_and_sidetrack(
             "sidetrack_window_azi_deg": float(window.azi_deg),
             "sidetrack_lateral_md_m": sidetrack_lateral_md_m,
             "sidetrack_complete_lateral_md_m": sidetrack_lateral_md_m,
+            "sidetrack_total_md_m": md_total_m,
             "pilot_total_md_m": pilot_total_md_m,
             "total_drilled_md_m": total_drilled_md_m,
+            "total_drilled_footage_m": total_drilled_md_m,
             "sidetrack_window_optimization_objective_m": total_drilled_md_m,
             "md_total_m": md_total_m,
             "max_total_md_postcheck_m": float(config.max_total_md_postcheck_m),
             "md_postcheck_excess_m": max(
                 0.0,
-                total_drilled_md_m - float(config.max_total_md_postcheck_m),
+                md_total_m - float(config.max_total_md_postcheck_m),
             ),
             "md_postcheck_exceeded": (
                 "yes"
-                if total_drilled_md_m > float(config.max_total_md_postcheck_m) + 1e-6
+                if md_total_m > float(config.max_total_md_postcheck_m) + 1e-6
                 else "no"
             ),
             "max_dls_total_deg_per_30m": max_dls,

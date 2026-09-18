@@ -12,6 +12,7 @@ from pywp.mcm import add_dls, wrap_azimuth_deg
 from pywp.pydantic_base import FrozenArbitraryModel
 from pywp.reference_trajectories import ImportedTrajectoryWell
 from pywp.ui_utils import dls_to_pi
+from pywp.well_names import is_pilot_name
 
 HORIZONTAL_INC_THRESHOLD_DEG = 80.0
 HORIZONTAL_MIN_INTERVAL_M = 100.0
@@ -166,8 +167,7 @@ def actual_well_pad_group(name: object) -> str:
 
 
 def actual_well_is_pilot_name(name: object) -> bool:
-    label = str(name or "").strip().upper()
-    return bool(label.endswith("_PL"))
+    return is_pilot_name(name)
 
 
 def actual_well_is_horizontal(stations: pd.DataFrame) -> bool:

@@ -7,6 +7,11 @@ import pandas as pd
 import streamlit as st
 from pydantic import field_validator
 
+from pywp.md_metrics import (
+    md_postcheck_issue_message_ru,
+    md_total_display_label_ru,
+    parent_bore_md_display_label_ru,
+)
 from pywp.models import Point3D, SummaryValue, TrajectoryConfig
 from pywp.planner_config import optimization_display_label
 from pywp.pydantic_base import FrozenArbitraryModel, coerce_model_like
@@ -39,7 +44,13 @@ SUMMARY_MAIN_METRICS: tuple[tuple[str, str], ...] = (
     ("max_dls_total_deg_per_30m", "Макс ПИ по стволу, deg/10m"),
     ("max_inc_actual_deg", "Макс INC фактический, deg"),
     ("max_inc_deg", "Макс INC лимит, deg"),
+    ("pilot_total_md_m", "MD пилота от устья до забоя, м"),
     ("md_total_m", "Итоговая MD, м"),
+    (
+        "sidetrack_complete_lateral_md_m",
+        "Боковой ствол от окна до забоя, м",
+    ),
+    ("total_drilled_footage_m", "Суммарный метраж бурения, м"),
     ("max_total_md_postcheck_m", "Лимит итоговой MD (постпроверка), м"),
 )
 
@@ -68,6 +79,8 @@ SUMMARY_TECH_HIDDEN_METRICS = frozenset(
         "t3_miss_dx_m",
         "t3_miss_dy_m",
         "t3_miss_dz_m",
+        "sidetrack_total_md_m",
+        "total_drilled_md_m",
     }
 )
 
@@ -169,30 +182,7 @@ def _summary_float_or_none(value: object) -> float | None:
 
 
 def md_postcheck_issue_message(summary: Mapping[str, float | str]) -> str:
-    md_postcheck_excess_m = (
-        _summary_float_or_none(summary.get("md_postcheck_excess_m")) or 0.0
-    )
-    if md_postcheck_excess_m <= 1e-6:
-        return ""
-    checked_md_m = _summary_float_or_none(summary.get("total_drilled_md_m"))
-    if checked_md_m is None:
-        checked_md_m = _summary_float_or_none(summary.get("md_total_m"))
-    md_limit_m = _summary_float_or_none(summary.get("max_total_md_postcheck_m"))
-    if checked_md_m is None and md_limit_m is not None:
-        checked_md_m = md_limit_m + md_postcheck_excess_m
-    if md_limit_m is None and checked_md_m is not None:
-        md_limit_m = max(0.0, checked_md_m - md_postcheck_excess_m)
-    if checked_md_m is None or md_limit_m is None:
-        return (
-            "Превышен лимит итоговой MD (постпроверка): "
-            f"+{md_postcheck_excess_m:.2f} м."
-        )
-    return (
-        "Превышен лимит итоговой MD (постпроверка): "
-        f"{checked_md_m:.2f} м > "
-        f"{md_limit_m:.2f} м "
-        f"(+{md_postcheck_excess_m:.2f} м)."
-    )
+    return md_postcheck_issue_message_ru(summary)
 
 
 def collect_issue_messages(
@@ -312,6 +302,45 @@ def build_key_metrics_rows(view: SingleWellResultView) -> list[dict[str, str]]:
     optimization_mode = str(summary.get("optimization_mode", view.config.optimization_mode))
     optimization_label = optimization_display_label(optimization_mode)
 
+    md_rows: list[dict[str, str]] = []
+    trajectory_type = str(summary.get("trajectory_type", "")).strip().upper()
+    if trajectory_type in {"PILOT_SIDETRACK", "FACT_SIDETRACK"}:
+        pilot_total_md_m = _summary_float_or_none(summary.get("pilot_total_md_m"))
+        if pilot_total_md_m is not None:
+            md_rows.append(
+                {
+                    "Показатель": parent_bore_md_display_label_ru(summary),
+                    "Значение": format_distance(pilot_total_md_m),
+                }
+            )
+    md_rows.append(
+        {
+            "Показатель": md_total_display_label_ru(summary),
+            "Значение": format_distance(float(summary["md_total_m"])),
+        }
+    )
+    if trajectory_type in {"PILOT_SIDETRACK", "FACT_SIDETRACK"}:
+        lateral_md_m = _summary_float_or_none(
+            summary.get("sidetrack_complete_lateral_md_m")
+        )
+        if lateral_md_m is not None:
+            md_rows.append(
+                {
+                    "Показатель": "Боковой ствол от окна до забоя",
+                    "Значение": format_distance(lateral_md_m),
+                }
+            )
+        drilled_footage_m = _summary_float_or_none(
+            summary.get("total_drilled_footage_m")
+        )
+        if drilled_footage_m is not None:
+            md_rows.append(
+                {
+                    "Показатель": "Суммарный метраж бурения",
+                    "Значение": format_distance(drilled_footage_m),
+                }
+            )
+
     rows = [
         {
             "Показатель": "Модель траектории",
@@ -382,10 +411,7 @@ def build_key_metrics_rows(view: SingleWellResultView) -> list[dict[str, str]]:
                 f"{float(summary['max_inc_deg']):.2f} deg"
             ),
         },
-        {
-            "Показатель": "Итоговая MD",
-            "Значение": format_distance(float(summary["md_total_m"])),
-        },
+        *md_rows,
         {
             "Показатель": "Рестарты решателя",
             "Значение": _format_solver_restart_text(summary),
@@ -645,6 +671,12 @@ def render_result_tables(
         for key, label in SUMMARY_MAIN_METRICS:
             if key not in summary_visible:
                 continue
+            if key == "md_total_m":
+                label = f"{md_total_display_label_ru(summary)}, м"
+            elif key == "pilot_total_md_m":
+                label = f"{parent_bore_md_display_label_ru(summary)}, м"
+            elif key == "max_total_md_postcheck_m":
+                label = f"Лимит {md_total_display_label_ru(summary)}, м"
             main_rows.append(
                 {
                     "Показатель": label,

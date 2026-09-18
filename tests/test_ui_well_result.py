@@ -77,8 +77,9 @@ def test_md_postcheck_issue_message_is_empty_without_excess() -> None:
     assert md_postcheck_issue_message(summary) == ""
 
 
-def test_md_postcheck_issue_message_uses_pilot_sidetrack_drilled_md() -> None:
+def test_md_postcheck_issue_message_uses_sidetrack_md_from_wellhead() -> None:
     summary = {
+        "trajectory_type": "PILOT_SIDETRACK",
         "md_total_m": 1800.0,
         "total_drilled_md_m": 2200.0,
         "max_total_md_postcheck_m": 2000.0,
@@ -87,7 +88,20 @@ def test_md_postcheck_issue_message_uses_pilot_sidetrack_drilled_md() -> None:
 
     message = md_postcheck_issue_message(summary)
 
-    assert "2200.00 м > 2000.00 м" in message
+    assert message == ""
+
+    exceeded_message = md_postcheck_issue_message(
+        {
+            "trajectory_type": "PILOT_SIDETRACK",
+            "md_total_m": 2200.0,
+            "total_drilled_md_m": 3000.0,
+            "max_total_md_postcheck_m": 2000.0,
+            "md_postcheck_excess_m": 1000.0,
+        }
+    )
+
+    assert "MD бокового ствола от устья до забоя" in exceeded_message
+    assert "2200.00 м > 2000.00 м (+200.00 м)" in exceeded_message
 
     overflow_message = md_postcheck_issue_message(
         {
@@ -98,7 +112,33 @@ def test_md_postcheck_issue_message_uses_pilot_sidetrack_drilled_md() -> None:
     )
 
     assert "2200.00 м > 2000.00 м" in overflow_message
-    assert "1800.00 м" not in message
+
+    assert (
+        md_postcheck_issue_message(
+            {
+                "trajectory_type": "PILOT_SIDETRACK",
+                "md_total_m": float("nan"),
+                "sidetrack_total_md_m": 1800.0,
+                "total_drilled_md_m": 2200.0,
+                "max_total_md_postcheck_m": 2000.0,
+                "md_postcheck_excess_m": 200.0,
+            }
+        )
+        == ""
+    )
+
+    alias_message = md_postcheck_issue_message(
+        {
+            "trajectory_type": "PILOT_SIDETRACK",
+            "md_total_m": float("nan"),
+            "sidetrack_total_md_m": 2200.0,
+            "total_drilled_md_m": 3000.0,
+            "max_total_md_postcheck_m": 2000.0,
+            "md_postcheck_excess_m": 1000.0,
+        }
+    )
+
+    assert "2200.00 м > 2000.00 м (+200.00 м)" in alias_message
 
 
 def test_md_postcheck_issue_message_handles_nonfinite_summary_values() -> None:
@@ -472,3 +512,42 @@ def test_build_key_metrics_rows_single_column_format() -> None:
     assert by_label["Оптимизация"]["Значение"] == "Минимизация MD"
     assert by_label["Промах по латерали t1 / t3"]["Значение"] == "t1 26.70 m / t3 26.60 m"
     assert by_label["Промах по вертикали t1 / t3"]["Значение"] == "t1 0.1800 m / t3 0.1700 m"
+
+    sidetrack_view = view.validated_copy(
+        summary={
+            **dict(view.summary),
+            "trajectory_type": "PILOT_SIDETRACK",
+            "pilot_total_md_m": 4800.0,
+            "md_total_m": 4300.0,
+            "sidetrack_complete_lateral_md_m": 2500.0,
+            "total_drilled_footage_m": 7200.0,
+        }
+    )
+    sidetrack_rows = build_key_metrics_rows(sidetrack_view)
+    sidetrack_by_label = {row["Показатель"]: row for row in sidetrack_rows}
+
+    assert sidetrack_by_label["MD пилота от устья до забоя"]["Значение"] == (
+        "4800.00 m"
+    )
+    assert sidetrack_by_label["MD бокового ствола от устья до забоя"][
+        "Значение"
+    ] == "4300.00 m"
+    assert sidetrack_by_label["Боковой ствол от окна до забоя"]["Значение"] == (
+        "2500.00 m"
+    )
+    assert sidetrack_by_label["Суммарный метраж бурения"]["Значение"] == (
+        "7200.00 m"
+    )
+    assert "Итоговая MD" not in sidetrack_by_label
+
+    fact_sidetrack_view = sidetrack_view.validated_copy(
+        summary={
+            **dict(sidetrack_view.summary),
+            "trajectory_type": "FACT_SIDETRACK",
+        }
+    )
+    fact_labels = {
+        row["Показатель"] for row in build_key_metrics_rows(fact_sidetrack_view)
+    }
+    assert "MD исходного ствола от устья до забоя" in fact_labels
+    assert "MD пилота от устья до забоя" not in fact_labels

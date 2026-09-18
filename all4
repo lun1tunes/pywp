@@ -1556,7 +1556,7 @@ def render_survey_table_with_download(
         )
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/ui_well_result.py	26179
+===BEGIN_FILE===	pywp/ui_well_result.py	27345
 from __future__ import annotations
 
 import math
@@ -1566,6 +1566,11 @@ import pandas as pd
 import streamlit as st
 from pydantic import field_validator
 
+from pywp.md_metrics import (
+    md_postcheck_issue_message_ru,
+    md_total_display_label_ru,
+    parent_bore_md_display_label_ru,
+)
 from pywp.models import Point3D, SummaryValue, TrajectoryConfig
 from pywp.planner_config import optimization_display_label
 from pywp.pydantic_base import FrozenArbitraryModel, coerce_model_like
@@ -1598,7 +1603,13 @@ SUMMARY_MAIN_METRICS: tuple[tuple[str, str], ...] = (
     ("max_dls_total_deg_per_30m", "Макс ПИ по стволу, deg/10m"),
     ("max_inc_actual_deg", "Макс INC фактический, deg"),
     ("max_inc_deg", "Макс INC лимит, deg"),
+    ("pilot_total_md_m", "MD пилота от устья до забоя, м"),
     ("md_total_m", "Итоговая MD, м"),
+    (
+        "sidetrack_complete_lateral_md_m",
+        "Боковой ствол от окна до забоя, м",
+    ),
+    ("total_drilled_footage_m", "Суммарный метраж бурения, м"),
     ("max_total_md_postcheck_m", "Лимит итоговой MD (постпроверка), м"),
 )
 
@@ -1627,6 +1638,8 @@ SUMMARY_TECH_HIDDEN_METRICS = frozenset(
         "t3_miss_dx_m",
         "t3_miss_dy_m",
         "t3_miss_dz_m",
+        "sidetrack_total_md_m",
+        "total_drilled_md_m",
     }
 )
 
@@ -1728,30 +1741,7 @@ def _summary_float_or_none(value: object) -> float | None:
 
 
 def md_postcheck_issue_message(summary: Mapping[str, float | str]) -> str:
-    md_postcheck_excess_m = (
-        _summary_float_or_none(summary.get("md_postcheck_excess_m")) or 0.0
-    )
-    if md_postcheck_excess_m <= 1e-6:
-        return ""
-    checked_md_m = _summary_float_or_none(summary.get("total_drilled_md_m"))
-    if checked_md_m is None:
-        checked_md_m = _summary_float_or_none(summary.get("md_total_m"))
-    md_limit_m = _summary_float_or_none(summary.get("max_total_md_postcheck_m"))
-    if checked_md_m is None and md_limit_m is not None:
-        checked_md_m = md_limit_m + md_postcheck_excess_m
-    if md_limit_m is None and checked_md_m is not None:
-        md_limit_m = max(0.0, checked_md_m - md_postcheck_excess_m)
-    if checked_md_m is None or md_limit_m is None:
-        return (
-            "Превышен лимит итоговой MD (постпроверка): "
-            f"+{md_postcheck_excess_m:.2f} м."
-        )
-    return (
-        "Превышен лимит итоговой MD (постпроверка): "
-        f"{checked_md_m:.2f} м > "
-        f"{md_limit_m:.2f} м "
-        f"(+{md_postcheck_excess_m:.2f} м)."
-    )
+    return md_postcheck_issue_message_ru(summary)
 
 
 def collect_issue_messages(
@@ -1871,6 +1861,45 @@ def build_key_metrics_rows(view: SingleWellResultView) -> list[dict[str, str]]:
     optimization_mode = str(summary.get("optimization_mode", view.config.optimization_mode))
     optimization_label = optimization_display_label(optimization_mode)
 
+    md_rows: list[dict[str, str]] = []
+    trajectory_type = str(summary.get("trajectory_type", "")).strip().upper()
+    if trajectory_type in {"PILOT_SIDETRACK", "FACT_SIDETRACK"}:
+        pilot_total_md_m = _summary_float_or_none(summary.get("pilot_total_md_m"))
+        if pilot_total_md_m is not None:
+            md_rows.append(
+                {
+                    "Показатель": parent_bore_md_display_label_ru(summary),
+                    "Значение": format_distance(pilot_total_md_m),
+                }
+            )
+    md_rows.append(
+        {
+            "Показатель": md_total_display_label_ru(summary),
+            "Значение": format_distance(float(summary["md_total_m"])),
+        }
+    )
+    if trajectory_type in {"PILOT_SIDETRACK", "FACT_SIDETRACK"}:
+        lateral_md_m = _summary_float_or_none(
+            summary.get("sidetrack_complete_lateral_md_m")
+        )
+        if lateral_md_m is not None:
+            md_rows.append(
+                {
+                    "Показатель": "Боковой ствол от окна до забоя",
+                    "Значение": format_distance(lateral_md_m),
+                }
+            )
+        drilled_footage_m = _summary_float_or_none(
+            summary.get("total_drilled_footage_m")
+        )
+        if drilled_footage_m is not None:
+            md_rows.append(
+                {
+                    "Показатель": "Суммарный метраж бурения",
+                    "Значение": format_distance(drilled_footage_m),
+                }
+            )
+
     rows = [
         {
             "Показатель": "Модель траектории",
@@ -1941,10 +1970,7 @@ def build_key_metrics_rows(view: SingleWellResultView) -> list[dict[str, str]]:
                 f"{float(summary['max_inc_deg']):.2f} deg"
             ),
         },
-        {
-            "Показатель": "Итоговая MD",
-            "Значение": format_distance(float(summary["md_total_m"])),
-        },
+        *md_rows,
         {
             "Показатель": "Рестарты решателя",
             "Значение": _format_solver_restart_text(summary),
@@ -2204,6 +2230,12 @@ def render_result_tables(
         for key, label in SUMMARY_MAIN_METRICS:
             if key not in summary_visible:
                 continue
+            if key == "md_total_m":
+                label = f"{md_total_display_label_ru(summary)}, м"
+            elif key == "pilot_total_md_m":
+                label = f"{parent_bore_md_display_label_ru(summary)}, м"
+            elif key == "max_total_md_postcheck_m":
+                label = f"Лимит {md_total_display_label_ru(summary)}, м"
             main_rows.append(
                 {
                     "Показатель": label,
@@ -4757,6 +4789,105 @@ def dls_figure(
     return fig
 
 ===END_FILE===
+===BEGIN_FILE===	pywp/well_names.py	2530
+from __future__ import annotations
+
+__all__ = [
+    "ALT_BRANCH_SUFFIX",
+    "PILOT_SUFFIX",
+    "ZBS_SUFFIX",
+    "is_alt_branch_name",
+    "is_pilot_name",
+    "is_zbs_name",
+    "parent_name_for_pilot",
+    "parent_name_for_zbs",
+    "pilot_name_for_parent",
+    "well_name_key",
+]
+
+PILOT_SUFFIX = "_PL"
+ZBS_SUFFIX = "_ZBS"
+ALT_BRANCH_SUFFIX = "_2"
+
+
+def _parent_for_optional_underscore_suffix(
+    name: object,
+    *,
+    suffix: str,
+) -> str | None:
+    text = str(name).strip()
+    folded = text.casefold()
+    bare_suffix = str(suffix).strip().lstrip("_").casefold()
+    separated_suffix = f"_{bare_suffix}"
+    if folded.endswith(separated_suffix):
+        parent = text[: -len(separated_suffix)]
+    elif folded.endswith(bare_suffix):
+        parent = text[: -len(bare_suffix)]
+    else:
+        return None
+    return parent if parent.strip() else None
+
+
+def is_pilot_name(name: object) -> bool:
+    return _parent_for_optional_underscore_suffix(
+        name,
+        suffix=PILOT_SUFFIX,
+    ) is not None
+
+
+def is_zbs_name(name: object) -> bool:
+    return _parent_for_optional_underscore_suffix(
+        name,
+        suffix=ZBS_SUFFIX,
+    ) is not None
+
+
+def is_alt_branch_name(name: object) -> bool:
+    text = str(name).strip()
+    return len(text) > len(ALT_BRANCH_SUFFIX) and text.endswith(ALT_BRANCH_SUFFIX)
+
+
+def parent_name_for_pilot(name: object) -> str:
+    text = str(name).strip()
+    return (
+        _parent_for_optional_underscore_suffix(text, suffix=PILOT_SUFFIX)
+        or text
+    )
+
+
+def parent_name_for_zbs(name: object) -> str:
+    text = str(name).strip()
+    zbs_parent = _parent_for_optional_underscore_suffix(text, suffix=ZBS_SUFFIX)
+    if zbs_parent is not None:
+        return zbs_parent
+    if is_alt_branch_name(text):
+        return text[: -len(ALT_BRANCH_SUFFIX)]
+    return text
+
+
+def pilot_name_for_parent(name: object) -> str:
+    return f"{str(name).strip()}{PILOT_SUFFIX}"
+
+
+def well_name_key(name: object) -> str:
+    """Return a case-insensitive key with compact suffixes canonicalized."""
+
+    text = str(name).strip()
+    pilot_parent = _parent_for_optional_underscore_suffix(
+        text,
+        suffix=PILOT_SUFFIX,
+    )
+    if pilot_parent is not None:
+        return f"{pilot_parent.strip().casefold()}{PILOT_SUFFIX.casefold()}"
+    zbs_parent = _parent_for_optional_underscore_suffix(
+        text,
+        suffix=ZBS_SUFFIX,
+    )
+    if zbs_parent is not None:
+        return f"{zbs_parent.strip().casefold()}{ZBS_SUFFIX.casefold()}"
+    return text.casefold()
+
+===END_FILE===
 ===BEGIN_FILE===	pywp/well_pad.py	17362
 from __future__ import annotations
 
@@ -5252,7 +5383,7 @@ def _vector_to_azimuth_deg(*, dx: float, dy: float) -> float:
     return float(math.degrees(math.atan2(float(dx), float(dy))) % 360.0)
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/welltrack_batch.py	124838
+===BEGIN_FILE===	pywp/welltrack_batch.py	125044
 from __future__ import annotations
 
 import logging
@@ -5302,6 +5433,7 @@ from pywp.models import (
     SummaryDict,
     TrajectoryConfig,
 )
+from pywp.md_metrics import md_postcheck_issue_message_ru
 from pywp.multi_horizontal import extend_plan_with_multi_horizontal_targets
 from pywp.parallel import calculation_budgeted, process_pool_context
 from pywp.pilot_wells import (
@@ -6046,21 +6178,9 @@ def _pilot_build_result_to_updated_success(
 
 def _postcheck_state(summary: Mapping[str, object]) -> tuple[bool, str]:
     messages: list[str] = []
-    md_total_m = _summary_float(summary, "total_drilled_md_m")
-    if md_total_m <= 0.0:
-        md_total_m = _summary_float(summary, "md_total_m")
-    md_limit_m = _summary_float(summary, "max_total_md_postcheck_m")
-    md_postcheck_excess_m = _summary_float(summary, "md_postcheck_excess_m")
-    if md_limit_m > 0.0 and md_total_m > md_limit_m:
-        md_postcheck_excess_m = max(
-            md_postcheck_excess_m,
-            md_total_m - md_limit_m,
-        )
-    if md_postcheck_excess_m > 1e-6:
-        messages.append(
-            "Превышен лимит итоговой MD (постпроверка): "
-            f"{md_total_m:.2f} м > {md_limit_m:.2f} м (+{md_postcheck_excess_m:.2f} м)."
-        )
+    md_message = md_postcheck_issue_message_ru(summary)
+    if md_message:
+        messages.append(md_message)
     dls_excess = _summary_float(summary, "dls_postcheck_excess_deg_per_30m")
     if dls_excess > 1e-6:
         max_dls = _summary_float(summary, "max_dls_total_deg_per_30m")
@@ -6175,6 +6295,18 @@ def _refresh_pilot_sidetrack_drilled_md_summary(
             md_total_m = station_md_total_m
     if not np.isfinite(md_total_m):
         md_total_m = 0.0
+    md_limit_m = float(config.max_total_md_postcheck_m)
+    refreshed.update(
+        {
+            "md_total_m": md_total_m,
+            "sidetrack_total_md_m": md_total_m,
+            "max_total_md_postcheck_m": md_limit_m,
+            "md_postcheck_excess_m": max(0.0, md_total_m - md_limit_m),
+            "md_postcheck_exceeded": (
+                "yes" if md_total_m > md_limit_m + 1e-6 else "no"
+            ),
+        }
+    )
     complete_lateral_md_m = md_total_m - window_md_m
     if (
         pilot_total_md_m <= 0.0
@@ -6220,26 +6352,28 @@ def _refresh_pilot_sidetrack_drilled_md_summary(
             # md_total_m may include later multi-target extensions; only use it
             # for legacy summaries without drilled-lateral metadata.
             sidetrack_lateral_md_m = complete_lateral_md_m
+    # Keep drilled footage separate from the final MD of the sidetrack bore.
     total_drilled_md_m = pilot_total_md_m + sidetrack_lateral_md_m
     sidetrack_complete_lateral_md_m = complete_lateral_md_m
     sidetrack_window_optimization_objective_m = (
         pilot_total_md_m + sidetrack_complete_lateral_md_m
     )
-    md_limit_m = float(config.max_total_md_postcheck_m)
     refreshed.update(
         {
             "sidetrack_lateral_md_m": sidetrack_lateral_md_m,
             "sidetrack_complete_lateral_md_m": sidetrack_complete_lateral_md_m,
             "pilot_total_md_m": pilot_total_md_m,
             "md_total_m": md_total_m,
+            "sidetrack_total_md_m": md_total_m,
             "total_drilled_md_m": total_drilled_md_m,
+            "total_drilled_footage_m": sidetrack_window_optimization_objective_m,
             "sidetrack_window_optimization_objective_m": (
                 sidetrack_window_optimization_objective_m
             ),
             "max_total_md_postcheck_m": md_limit_m,
-            "md_postcheck_excess_m": max(0.0, total_drilled_md_m - md_limit_m),
+            "md_postcheck_excess_m": max(0.0, md_total_m - md_limit_m),
             "md_postcheck_exceeded": (
-                "yes" if total_drilled_md_m > md_limit_m + 1e-6 else "no"
+                "yes" if md_total_m > md_limit_m + 1e-6 else "no"
             ),
         }
     )
@@ -7930,6 +8064,9 @@ class WelltrackBatchPlanner:
                             ),
                             "pilot_total_md_m": float(fallback.pilot.md_total_m),
                             "total_drilled_md_m": float(fallback.total_drilled_md_m),
+                            "total_drilled_footage_m": float(
+                                fallback.total_drilled_md_m
+                            ),
                             "sidetrack_window_optimization_objective_m": float(
                                 fallback.total_drilled_md_m
                             ),
@@ -8553,7 +8690,7 @@ def _offset_xy(*, surface: WelltrackPoint | Point3D, target: WelltrackPoint) -> 
     return float(math.hypot(dx, dy))
 
 ===END_FILE===
-===BEGIN_FILE===	pywp/welltrack_targets.py	8384
+===BEGIN_FILE===	pywp/welltrack_targets.py	8563
 from __future__ import annotations
 
 import re
@@ -8572,13 +8709,18 @@ from pywp.pilot_wells import (
     zbs_multi_horizontal_level_count,
 )
 
-_TARGET_SEQUENCE_POINT_RE = re.compile(r"^t([1-9]\d*)$", flags=re.IGNORECASE)
+_TARGET_SEQUENCE_POINT_RE = re.compile(
+    r"^t_?([1-9]\d*)$",
+    flags=re.IGNORECASE,
+)
 _MULTI_HORIZONTAL_POINT_RE = re.compile(
-    r"^([1-9]\d*)_t([13])$",
+    r"^([1-9]\d*)_?t_?([13])$",
     flags=re.IGNORECASE,
 )
 _SURFACE_POINT_LABELS = {
     "s",
+    "s1",
+    "s_1",
     "surface",
     "wellhead",
     "well_head",
@@ -8796,13 +8938,18 @@ def _explicit_multi_horizontal_labels_are_valid(labels: tuple[str, ...]) -> bool
     matches = [_MULTI_HORIZONTAL_POINT_RE.fullmatch(label) for label in normalized]
     if any(match is None for match in matches) or len(normalized) % 2 != 0:
         return False
+    canonical = tuple(
+        f"{int(match.group(1))}_t{int(match.group(2))}"
+        for match in matches
+        if match is not None
+    )
     level_count = len(normalized) // 2
     expected = tuple(
         f"{level}_{suffix}"
         for level in range(1, level_count + 1)
         for suffix in ("t1", "t3")
     )
-    return normalized == expected
+    return canonical == expected
 
 ===END_FILE===
 ===BEGIN_FILE===	scripts/check_solver_baseline.py	6962
@@ -10250,137 +10397,3 @@ def _format_welltrack_text(wells: list[tuple[str, pd.DataFrame]]) -> str:
 
 def generate_actual_fund_depth_clusters(*, target: Path) -> None:
     base_records = parse_welltrack_text(BASE_SOURCE.read_text(encoding="utf-8"))
-    templates = [welltrack_points_to_targets(record.points) for record in base_records]
-    offsets = _grid_offsets(WELL_COUNT)
-    planner = TrajectoryPlanner()
-    config = _config()
-
-    wells: list[tuple[str, pd.DataFrame]] = []
-    for index in range(WELL_COUNT):
-        surface, t1, t3 = templates[index % len(templates)]
-        dx_m, dy_m = offsets[index]
-        horizontal_entry_tvd_m = _cluster_depth_tvd(index)
-        tail_delta_z_m = float(
-            HORIZONTAL_TAIL_DELTA_Z_PATTERN_M[index % len(HORIZONTAL_TAIL_DELTA_Z_PATTERN_M)]
-        )
-        shifted_surface, shifted_t1, shifted_t3 = _translated_targets(
-            surface=surface,
-            t1=t1,
-            t3=t3,
-            dx_m=dx_m,
-            dy_m=dy_m,
-            horizontal_entry_tvd_m=horizontal_entry_tvd_m,
-            tail_delta_z_m=tail_delta_z_m,
-        )
-        result = planner.plan(
-            surface=shifted_surface,
-            t1=shifted_t1,
-            t3=shifted_t3,
-            config=config,
-        )
-        wells.append((f"FACT_DEPTH_{index + 1:03d}", result.stations.copy()))
-
-    target.write_text(_format_welltrack_text(wells), encoding="utf-8")
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Generate clustered actual-fund WELLTRACK data across several depth bands."
-    )
-    parser.add_argument(
-        "--target",
-        type=Path,
-        default=DEFAULT_TARGET,
-        help=f"Output path (default: {DEFAULT_TARGET})",
-    )
-    args = parser.parse_args()
-    generate_actual_fund_depth_clusters(target=Path(args.target))
-
-
-if __name__ == "__main__":
-    main()
-
-===END_FILE===
-===BEGIN_FILE===	scripts/generate_reference_stress_welltracks.py	5581
-from __future__ import annotations
-
-import argparse
-import math
-from pathlib import Path
-
-import pandas as pd
-
-from pywp import TrajectoryConfig, TrajectoryPlanner
-from pywp.eclipse_welltrack import parse_welltrack_text, welltrack_points_to_targets
-
-BASE_SOURCE = Path("tests/test_data/WELLTRACKS3.INC")
-DEFAULT_FACT_TARGET = Path("tests/test_data/WELLTRACKS_FACT.INC")
-DEFAULT_PROJECT_TARGET = Path("tests/test_data/WELLTRACKS_PROJECT.INC")
-
-FACT_COUNT = 130
-PROJECT_COUNT = 90
-GRID_COLUMNS = 10
-X_STEP_PATTERN_M = (1050.0, 1500.0, 1950.0, 2400.0, 3000.0, 3600.0)
-Y_STEP_PATTERN_M = (1200.0, 1650.0, 2100.0, 2550.0, 3150.0)
-PROJECT_GLOBAL_OFFSET_X_M = 32000.0
-PROJECT_GLOBAL_OFFSET_Y_M = 6000.0
-OUTPUT_MD_STEP_M = 30.0
-
-
-def _cumulative_positions(count: int, steps: tuple[float, ...]) -> list[float]:
-    values = [0.0]
-    while len(values) < count:
-        previous = values[-1]
-        step = float(steps[(len(values) - 1) % len(steps)])
-        values.append(previous + step)
-    return values
-
-
-def _centered_grid_offsets(
-    *,
-    count: int,
-    columns: int,
-    global_x_offset_m: float = 0.0,
-    global_y_offset_m: float = 0.0,
-) -> list[tuple[float, float]]:
-    rows = int(math.ceil(float(count) / float(columns)))
-    x_positions = _cumulative_positions(columns, X_STEP_PATTERN_M)
-    y_positions = _cumulative_positions(rows, Y_STEP_PATTERN_M)
-    x_center = 0.5 * (x_positions[0] + x_positions[-1])
-    y_center = 0.5 * (y_positions[0] + y_positions[-1])
-    offsets: list[tuple[float, float]] = []
-    for index in range(count):
-        row = index // columns
-        col = index % columns
-        offsets.append(
-            (
-                float(x_positions[col] - x_center + global_x_offset_m),
-                float(y_positions[row] - y_center + global_y_offset_m),
-            )
-        )
-    return offsets
-
-
-def _stress_config() -> TrajectoryConfig:
-    return TrajectoryConfig(
-        optimization_mode="none",
-        md_step_m=OUTPUT_MD_STEP_M,
-        md_step_control_m=5.0,
-        max_total_md_postcheck_m=20000.0,
-    )
-
-
-def _translate_targets(surface, t1, t3, dx_m: float, dy_m: float):
-    return (
-        surface.model_copy(
-            update={"x": float(surface.x + dx_m), "y": float(surface.y + dy_m)}
-        ),
-        t1.model_copy(update={"x": float(t1.x + dx_m), "y": float(t1.y + dy_m)}),
-        t3.model_copy(update={"x": float(t3.x + dx_m), "y": float(t3.y + dy_m)}),
-    )
-
-
-def _plan_translated_wells(
-    *,
-    prefix: str,
-    count: int,

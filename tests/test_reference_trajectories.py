@@ -260,8 +260,8 @@ def test_parse_reference_trajectory_dev_directories_rejects_duplicate_stems(
     folder_a.mkdir()
     folder_b.mkdir()
     dev_text = "\n".join(["MD X Y Z", "0 0 0 0", "100 1 1 -100"])
-    (folder_a / "well_111.dev").write_text(dev_text, encoding="utf-8")
-    (folder_b / "WELL_111.dev").write_text(dev_text, encoding="utf-8")
+    (folder_a / "well_111_PL.dev").write_text(dev_text, encoding="utf-8")
+    (folder_b / "WELL_111pl.dev").write_text(dev_text, encoding="utf-8")
 
     with pytest.raises(WelltrackParseError, match="одинаковым именем"):
         parse_reference_trajectory_dev_directories(

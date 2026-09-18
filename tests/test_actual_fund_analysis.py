@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from pywp.actual_fund_analysis import (
     ActualFundWellMetrics,
     _reconstruct_actual_survey,
     actual_well_family_name,
     actual_well_is_horizontal,
+    actual_well_is_pilot_name,
     actual_well_pad_group,
     build_actual_fund_kop_depth_function,
     build_actual_fund_well_analysis,
@@ -112,6 +112,7 @@ def _synthetic_noisy_vertical_hold_actual_well(name: str = "9003") -> tuple:
 
 def test_actual_well_family_and_pad_group_extract_numeric_prefixes() -> None:
     assert actual_well_family_name("7401_PL") == "7401"
+    assert actual_well_is_pilot_name("7401PL") is True
     assert actual_well_family_name("7402_2") == "7402"
     assert actual_well_pad_group("6103") == "61"
     assert actual_well_pad_group("8210") == "82"

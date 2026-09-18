@@ -178,7 +178,7 @@ def single_well_three_payload(
         }
     )
     for target_label, target_point in zip(target_labels, target_points, strict=False):
-        if str(target_label).strip().upper() == "S":
+        if str(target_label).strip().casefold() in {"s", "s1", "s_1"}:
             continue
         payload["labels"].append(
             _point_payload_label(

@@ -16,13 +16,18 @@ from pywp.pilot_wells import (
     zbs_multi_horizontal_level_count,
 )
 
-_TARGET_SEQUENCE_POINT_RE = re.compile(r"^t([1-9]\d*)$", flags=re.IGNORECASE)
+_TARGET_SEQUENCE_POINT_RE = re.compile(
+    r"^t_?([1-9]\d*)$",
+    flags=re.IGNORECASE,
+)
 _MULTI_HORIZONTAL_POINT_RE = re.compile(
-    r"^([1-9]\d*)_t([13])$",
+    r"^([1-9]\d*)_?t_?([13])$",
     flags=re.IGNORECASE,
 )
 _SURFACE_POINT_LABELS = {
     "s",
+    "s1",
+    "s_1",
     "surface",
     "wellhead",
     "well_head",
@@ -240,10 +245,15 @@ def _explicit_multi_horizontal_labels_are_valid(labels: tuple[str, ...]) -> bool
     matches = [_MULTI_HORIZONTAL_POINT_RE.fullmatch(label) for label in normalized]
     if any(match is None for match in matches) or len(normalized) % 2 != 0:
         return False
+    canonical = tuple(
+        f"{int(match.group(1))}_t{int(match.group(2))}"
+        for match in matches
+        if match is not None
+    )
     level_count = len(normalized) // 2
     expected = tuple(
         f"{level}_{suffix}"
         for level in range(1, level_count + 1)
         for suffix in ("t1", "t3")
     )
-    return normalized == expected
+    return canonical == expected

@@ -21,6 +21,7 @@ from pywp.mcm import add_dls
 from pywp.models import Point3D
 from pywp.path_utils import normalize_user_path_text
 from pywp.pydantic_base import FrozenArbitraryModel
+from pywp.well_names import well_name_key
 
 REFERENCE_WELL_ACTUAL = "actual"
 REFERENCE_WELL_APPROVED = "approved"
@@ -440,7 +441,7 @@ def parse_reference_trajectory_dev_directories(
     seen_names: dict[str, Path] = {}
     for dev_file in dev_files:
         well_name = dev_file.stem
-        well_key = well_name.casefold()
+        well_key = well_name_key(well_name)
         previous_path = seen_names.get(well_key)
         if previous_path is not None:
             raise WelltrackParseError(
@@ -580,7 +581,7 @@ def reference_well_duplicate_name_keys(
 ) -> set[str]:
     name_counts: dict[str, int] = {}
     for well in wells:
-        key = str(well.name).strip().casefold()
+        key = well_name_key(well.name)
         if not key:
             continue
         name_counts[key] = int(name_counts.get(key, 0)) + 1
@@ -594,9 +595,9 @@ def reference_well_collision_name(
     duplicate_name_keys: set[str] | None = None,
 ) -> str:
     name = str(well.name)
-    name_key = name.strip().casefold()
+    name_key = well_name_key(name)
     planned_name_keys = {
-        str(item).strip().casefold()
+        well_name_key(item)
         for item in planned_names
         if str(item).strip()
     }

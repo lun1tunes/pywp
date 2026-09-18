@@ -13,6 +13,7 @@ from pywp.eclipse_welltrack import (
     WelltrackRecord,
     WelltrackParseError,
     decode_welltrack_bytes,
+    normalize_welltrack_table_point_label,
     parse_welltrack_points_table,
     parse_welltrack_text,
 )
@@ -276,16 +277,8 @@ def normalize_source_table_df_for_ui(table_df: pd.DataFrame | None) -> pd.DataFr
 
 
 def _normalize_source_table_point_value(value: object) -> object:
-    text = str(value).strip()
-    if text.lower() in {"wellhead", "s"}:
-        return "S"
-    multi_match = re.match(r"^([1-9]\d*)_t([13])$", text, flags=re.IGNORECASE)
-    if multi_match is not None:
-        return f"{int(multi_match.group(1))}_t{int(multi_match.group(2))}"
-    pilot_match = re.match(r"^pl([1-9]\d*)$", text, flags=re.IGNORECASE)
-    if pilot_match is not None:
-        return f"PL{int(pilot_match.group(1))}"
-    return value
+    normalized = normalize_welltrack_table_point_label(value)
+    return value if normalized is None else normalized
 
 
 def normalized_target_source_format(
@@ -381,7 +374,7 @@ def build_target_import_operation(
             progress_message="Разбор таблицы точек...",
             count_message_template="Собрано скважин из таблицы: {record_count}.",
             success_label_template="Импорт таблицы завершен за {elapsed_s:.2f} с",
-            error_label="Ошибка разбора табличного WELLTRACK",
+            error_label="Ошибка импорта таблицы точек",
             table_rows=pd.DataFrame(table_rows),
             parse_welltrack_text_func=parse_welltrack_text_func,
         )
@@ -621,8 +614,7 @@ def expand_single_column_source_table_df(table_df: pd.DataFrame) -> pd.DataFrame
     for raw_value in non_blank_values:
         tokens = [
             token.strip()
-            for token in re.split(r"[\t;]+", raw_value)
-            if token.strip()
+            for token in re.split(r"[\t;]", raw_value)
         ]
         if len(tokens) not in {5, 6}:
             return table_df
@@ -689,7 +681,7 @@ def _parse_dev_target_payload(
             continue
         assert parsed_item is not None
         record, summary, imported_well = parsed_item
-        well_key = str(imported_well.name).strip().casefold()
+        well_key = well_name_key(imported_well.name)
         if well_key in seen_success_keys:
             failures.append(
                 TargetImportFailure(
@@ -825,7 +817,7 @@ def dev_source_preview_well_names(
         normalized = str(raw_name).strip()
         if not normalized:
             return
-        key = normalized.casefold()
+        key = well_name_key(normalized)
         if key in seen:
             return
         seen.add(key)
