@@ -7,7 +7,6 @@ import streamlit as st
 from streamlit.errors import StreamlitAPIException
 
 from pywp import ptc_core as wt
-from pywp import ptc_reference_state
 from pywp.pilot_wells import (
     SidetrackWindowOverride,
     is_pilot_name,
@@ -242,7 +241,7 @@ def _render_sidetrack_window_params(
     state = st.session_state
     apply_editor_sidetrack_window_defaults(state, parent_names=parent_names)
     selected_parent = _selected_sidetrack_parent_name(parent_names, state)
-    st.markdown("#### Параметры боковых стволов")
+    st.markdown("#### Параметры окон зарезки")
     c1, c2, c3, c4 = st.columns(
         [2.2, 1.25, 1.15, 1.6],
         gap="small",
@@ -250,7 +249,7 @@ def _render_sidetrack_window_params(
     )
     with c1:
         selected_parent = st.selectbox(
-            "Скважина / боковой ствол",
+            "Скважина",
             options=parent_names,
             key=_SIDETRACK_PARENT_KEY,
             disabled=len(parent_names) == 1,

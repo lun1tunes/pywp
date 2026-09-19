@@ -131,7 +131,11 @@ def test_ptc_page_run_applies_manual_sidetrack_window_override() -> None:
     at.session_state["wt_records_original"] = records
     at.session_state[_sidetrack_mode_key("WELL-04")] = _SIDETRACK_MANUAL
     at.session_state[_sidetrack_kind_key("WELL-04")] = "MD"
-    at.session_state[_sidetrack_value_key("WELL-04")] = 760.0
+    # In the default "Пилот от ГС" mode the manual MD is measured along the
+    # classical main bore.  Around 500 m the main-bore pose still permits a
+    # bounded BUILD+HOLD connection to the first PL at the selected 1 deg/10m
+    # limit; the old 760 m value belonged to the pilot-first semantics.
+    at.session_state[_sidetrack_value_key("WELL-04")] = 500.0
 
     at.run(timeout=120)
     _open_calc_params_panel(at)
@@ -169,7 +173,7 @@ def test_ptc_page_run_applies_manual_sidetrack_window_override() -> None:
     assert rows["WELL-04"]["Статус"] == "OK"
     by_name = {str(success.name): success for success in state["wt_successes"]}
     assert by_name["WELL-04"].summary["sidetrack_window_md_m"] == pytest.approx(
-        760.0
+        500.0
     )
 
 

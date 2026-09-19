@@ -10,6 +10,8 @@ from pywp.models import (
     OPTIMIZATION_MINIMIZE_KOP,
     OPTIMIZATION_MINIMIZE_MD,
     OPTIMIZATION_NONE,
+    PILOT_PLANNING_MAIN_BORE_FROM_PILOT,
+    PILOT_PLANNING_PILOT_FROM_MAIN_BORE,
     TURN_SOLVER_DE_HYBRID,
     TURN_SOLVER_LEAST_SQUARES,
     TrajectoryConfig,
@@ -42,6 +44,11 @@ J_PROFILE_POLICY_OPTIONS = {
     J_PROFILE_POLICY_OFF: "Не использовать J-профиль",
     J_PROFILE_POLICY_PROPOSE: "Предлагать J-профиль",
     J_PROFILE_POLICY_PREFER: "Предпочитать J-профиль",
+}
+
+PILOT_PLANNING_MODE_OPTIONS = {
+    PILOT_PLANNING_PILOT_FROM_MAIN_BORE: "Пилот от ГС",
+    PILOT_PLANNING_MAIN_BORE_FROM_PILOT: "ГС от пилота",
 }
 
 
@@ -92,6 +99,7 @@ def build_trajectory_config(
     use_fixed_kop: bool = False,
     min_hold_inc_deg: float | None = None,
     optimization_mode: str,
+    pilot_planning_mode: str = PILOT_PLANNING_PILOT_FROM_MAIN_BORE,
     turn_solver_mode: str,
     turn_solver_max_restarts: int,
     max_total_md_postcheck_m: float = 6500.0,
@@ -128,6 +136,7 @@ def build_trajectory_config(
             None if min_hold_inc_deg is None else float(min_hold_inc_deg)
         ),
         optimization_mode=str(optimization_mode),
+        pilot_planning_mode=str(pilot_planning_mode),
         turn_solver_mode=str(turn_solver_mode),
         turn_solver_max_restarts=int(turn_solver_max_restarts),
         max_total_md_postcheck_m=float(max_total_md_postcheck_m),

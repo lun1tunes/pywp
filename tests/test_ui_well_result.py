@@ -103,6 +103,16 @@ def test_md_postcheck_issue_message_uses_sidetrack_md_from_wellhead() -> None:
     assert "MD бокового ствола от устья до забоя" in exceeded_message
     assert "2200.00 м > 2000.00 м (+200.00 м)" in exceeded_message
 
+    main_first_message = md_postcheck_issue_message(
+        {
+            "trajectory_type": "PILOT_SIDETRACK",
+            "pilot_planning_mode": "pilot_from_main_bore",
+            "md_total_m": 2200.0,
+            "max_total_md_postcheck_m": 2000.0,
+        }
+    )
+    assert "MD ГС от устья до забоя" in main_first_message
+
     overflow_message = md_postcheck_issue_message(
         {
             "md_total_m": 10**10000,
@@ -539,6 +549,24 @@ def test_build_key_metrics_rows_single_column_format() -> None:
         "7200.00 m"
     )
     assert "Итоговая MD" not in sidetrack_by_label
+
+    main_first_view = sidetrack_view.validated_copy(
+        summary={
+            **dict(sidetrack_view.summary),
+            "pilot_planning_mode": "pilot_from_main_bore",
+        }
+    )
+    main_first_by_label = {
+        row["Показатель"]: row for row in build_key_metrics_rows(main_first_view)
+    }
+    assert main_first_by_label["MD ГС от устья до забоя"]["Значение"] == (
+        "4300.00 m"
+    )
+    assert main_first_by_label["ГС от окна до забоя"]["Значение"] == (
+        "2500.00 m"
+    )
+    assert "MD бокового ствола от устья до забоя" not in main_first_by_label
+    assert "Боковой ствол от окна до забоя" not in main_first_by_label
 
     fact_sidetrack_view = sidetrack_view.validated_copy(
         summary={

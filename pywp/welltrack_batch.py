@@ -6,7 +6,7 @@ from concurrent.futures.process import BrokenProcessPool
 from pickle import PicklingError
 from typing import Any, Callable, Iterable, Mapping
 from time import perf_counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 import pandas as pd
@@ -42,6 +42,8 @@ from pywp.anticollision_stage import (
 )
 from pywp.models import (
     INTERPOLATION_RODRIGUES,
+    PILOT_PLANNING_MAIN_BORE_FROM_PILOT,
+    PILOT_PLANNING_PILOT_FROM_MAIN_BORE,
     PlannerResult,
     Point3D,
     SummaryDict,
@@ -61,6 +63,8 @@ from pywp.pilot_wells import (
     order_records_with_pilots_first,
     parent_name_for_zbs,
     pilot_name_key_for_record,
+    pilot_record_problem_text,
+    plan_pilot_from_main_bore,
     plan_reoriented_pilot_sidetrack_fallback,
     select_sidetrack_window,
     well_name_key,
@@ -533,6 +537,60 @@ def rebuild_optimization_context(
     )
 
 
+def _optimization_context_without_reference_wells(
+    *,
+    context: AntiCollisionOptimizationContext | None,
+    excluded_well_names: Iterable[object],
+) -> AntiCollisionOptimizationContext | None:
+    """Drop stale trajectories that are rebuilt as part of the same well system."""
+
+    if context is None:
+        return None
+    excluded_keys = {
+        well_name_key(name) for name in excluded_well_names if str(name).strip()
+    }
+    if not excluded_keys:
+        return context
+    references = tuple(
+        reference
+        for reference in context.references
+        if well_name_key(reference.well_name) not in excluded_keys
+    )
+    if len(references) == len(context.references):
+        return context
+    return replace(context, references=references)
+
+
+def _ambiguous_main_first_pilot_parents(
+    *,
+    records: Iterable[WelltrackRecord],
+    base_config: TrajectoryConfig,
+    config_by_name: Mapping[str, TrajectoryConfig] | None,
+) -> dict[str, tuple[str, ...]]:
+    """Return pilots claimed by multiple main-first productive bores."""
+
+    ordered = tuple(records)
+    record_keys = {well_name_key(record.name) for record in ordered}
+    parent_names_by_pilot: dict[str, list[str]] = {}
+    for record in ordered:
+        if is_pilot_record(record) or is_zbs_record(record):
+            continue
+        pilot_key = pilot_name_key_for_record(record)
+        record_config = (config_by_name or {}).get(str(record.name), base_config)
+        if (
+            pilot_key not in record_keys
+            or str(record_config.pilot_planning_mode)
+            != PILOT_PLANNING_PILOT_FROM_MAIN_BORE
+        ):
+            continue
+        parent_names_by_pilot.setdefault(pilot_key, []).append(str(record.name))
+    return {
+        pilot_key: tuple(parent_names)
+        for pilot_key, parent_names in parent_names_by_pilot.items()
+        if len(parent_names) > 1
+    }
+
+
 def _normalized_attempted_anticollision_stages(
     summary: Mapping[str, object],
 ) -> list[str]:
@@ -620,6 +678,57 @@ def _evaluate_record_from_dicts(
         return row, success.model_dump() if success is not None else None
     row, success = _evaluate_record_standalone(record, config, opt_ctx)
     return row, success.model_dump() if success is not None else None
+
+
+def _evaluate_record_group_from_dicts(
+    record_dicts: tuple[dict, ...] | list[dict],
+    config_dict: dict,
+    config_by_name_dict: Mapping[str, dict] | None = None,
+    optimization_context_by_name_dict: Mapping[str, dict] | None = None,
+    reference_well_dicts: tuple[dict, ...] | list[dict] | None = None,
+    sidetrack_window_overrides_by_name_dict: Mapping[str, dict] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict], tuple[str, ...]]:
+    """Evaluate one dependency-connected well group inside a worker process."""
+
+    records = tuple(WelltrackRecord.model_validate(item) for item in record_dicts)
+    base_config = TrajectoryConfig.model_validate(config_dict)
+    configs_by_name = {
+        str(name): TrajectoryConfig.model_validate(payload)
+        for name, payload in (config_by_name_dict or {}).items()
+    }
+    contexts_by_name = {
+        str(name): _optimization_context_from_worker_payload(payload)
+        for name, payload in (optimization_context_by_name_dict or {}).items()
+    }
+    reference_wells = tuple(
+        ImportedTrajectoryWell.model_validate(item)
+        for item in tuple(reference_well_dicts or ())
+    )
+    overrides_by_name = {
+        str(name): SidetrackWindowOverride(
+            kind=str(payload.get("kind", "")),
+            value_m=float(payload.get("value_m", float("nan"))),
+        )
+        for name, payload in (sidetrack_window_overrides_by_name_dict or {}).items()
+    }
+    names = [str(record.name) for record in records]
+    planner = WelltrackBatchPlanner()
+    rows, successes = planner.evaluate(
+        records=records,
+        selected_names=set(names),
+        selected_order=names,
+        config=base_config,
+        config_by_name=configs_by_name,
+        optimization_context_by_name=contexts_by_name,
+        sidetrack_window_overrides_by_name=overrides_by_name,
+        reference_wells=reference_wells,
+        parallel_workers=0,
+    )
+    return (
+        rows,
+        [success.model_dump() for success in successes],
+        tuple(planner.last_evaluation_metadata.executed_well_names),
+    )
 
 
 def _evaluate_record_standalone(
@@ -922,11 +1031,7 @@ def _refresh_pilot_sidetrack_drilled_md_summary(
         }
     )
     complete_lateral_md_m = md_total_m - window_md_m
-    if (
-        pilot_total_md_m <= 0.0
-        or window_md_m < 0.0
-        or complete_lateral_md_m <= 0.0
-    ):
+    if pilot_total_md_m <= 0.0 or window_md_m < 0.0 or complete_lateral_md_m <= 0.0:
         return refreshed
 
     existing_lateral_md_m = _summary_finite_value(
@@ -1098,6 +1203,13 @@ class WelltrackBatchPlanner:
             records=records,
             selected_names=selected_names,
             selected_order=selected_order,
+            base_config=config,
+            config_by_name=config_by_name,
+        )
+        ambiguous_main_first_parents = _ambiguous_main_first_pilot_parents(
+            records=selected_records,
+            base_config=config,
+            config_by_name=config_by_name,
         )
         sidetrack_window_overrides_by_key = {
             well_name_key(name): override
@@ -1116,7 +1228,30 @@ class WelltrackBatchPlanner:
             and len(selected_records) > 1
         ):
             try:
-                if self._has_pilot_dependencies(selected_records):
+                has_main_first_dependencies = self._has_main_first_pilot_dependencies(
+                    selected_records,
+                    base_config=config,
+                    config_by_name=config_by_name,
+                )
+                dependency_groups = self._pilot_dependency_groups(selected_records)
+                if has_main_first_dependencies and len(dependency_groups) > 1:
+                    return self._evaluate_parallel_dependency_groups(
+                        ordered_records=selected_records,
+                        dependency_groups=dependency_groups,
+                        config=config,
+                        config_by_name=config_by_name,
+                        optimization_context_by_name=optimization_context_by_name,
+                        reference_wells=tuple(reference_wells),
+                        sidetrack_window_overrides_by_key=(
+                            sidetrack_window_overrides_by_key
+                        ),
+                        progress_callback=progress_callback,
+                        record_done_callback=record_done_callback,
+                        parallel_workers=int(parallel_workers),
+                    )
+                if not has_main_first_dependencies and self._has_pilot_dependencies(
+                    selected_records
+                ):
                     return self._evaluate_parallel_with_pilot_dependencies(
                         selected_records=selected_records,
                         config=config,
@@ -1132,7 +1267,7 @@ class WelltrackBatchPlanner:
                         record_done_callback=record_done_callback,
                         parallel_workers=int(parallel_workers),
                     )
-                else:
+                if not has_main_first_dependencies:
                     return self._evaluate_parallel(
                         selected_records=selected_records,
                         config=config,
@@ -1247,13 +1382,35 @@ class WelltrackBatchPlanner:
             record, runtime_override = self._next_record_for_evaluation(
                 selected_records_by_name=selected_records_by_name,
                 remaining_selected_names=remaining_selected_names,
-                selected_order=selected_order,
+                selected_order=[str(item.name) for item in selected_records],
                 base_config=config,
                 config_by_name=config_by_name,
                 optimization_context_by_name=optimization_context_by_name,
                 dynamic_cluster_plan=dynamic_cluster_plan,
                 recalculated_success_by_name=recalculated_success_by_name,
             )
+            runtime_config = runtime_override["config"]
+            runtime_context = runtime_override["optimization_context"]
+            if (
+                not is_pilot_record(record)
+                and not is_zbs_record(record)
+                and isinstance(runtime_config, TrajectoryConfig)
+                and str(runtime_config.pilot_planning_mode)
+                == PILOT_PLANNING_PILOT_FROM_MAIN_BORE
+            ):
+                runtime_override["optimization_context"] = (
+                    _optimization_context_without_reference_wells(
+                        context=(
+                            runtime_context
+                            if isinstance(
+                                runtime_context,
+                                AntiCollisionOptimizationContext,
+                            )
+                            else None
+                        ),
+                        excluded_well_names=(pilot_name_key_for_record(record),),
+                    )
+                )
             remaining_selected_names.remove(str(record.name))
             executed_well_names.append(str(record.name))
             if progress_callback is not None:
@@ -1276,12 +1433,36 @@ class WelltrackBatchPlanner:
 
                 planner_progress_callback = _planner_progress
 
+            current_pilot_key = (
+                well_name_key(record.name)
+                if is_pilot_record(record)
+                else (
+                    "" if is_zbs_record(record) else pilot_name_key_for_record(record)
+                )
+            )
+            ambiguous_parent_names = ambiguous_main_first_parents.get(
+                current_pilot_key,
+                (),
+            )
             missing_pilot = self._missing_required_pilot_success(
                 record=record,
                 selected_records_by_name=selected_records_by_name,
                 recalculated_success_by_name=recalculated_success_by_name,
+                config=runtime_override["config"],
             )
-            if missing_pilot is not None:
+            if ambiguous_parent_names:
+                row = self._base_row(record=record)
+                row["Статус"] = "Ошибка расчета"
+                row["Проблема"] = (
+                    "Один пилот неоднозначно связан с несколькими продуктивными "
+                    "стволами в режиме «Пилот от ГС»: "
+                    + ", ".join(ambiguous_parent_names)
+                    + ". Оставьте один ствол либо выберите «ГС от пилота» для "
+                    "общего пилота."
+                )
+                success = None
+                updated_pilot_success = None
+            elif missing_pilot is not None:
                 row = self._base_row(record=record)
                 row["Статус"] = "Ошибка расчета"
                 row["Проблема"] = self._missing_required_pilot_problem(
@@ -1290,21 +1471,95 @@ class WelltrackBatchPlanner:
                 )
                 success = None
             else:
-                evaluation = self._evaluate_record(
-                    record=record,
-                    config=runtime_override["config"],
-                    optimization_context=runtime_override["optimization_context"],
-                    planner_progress_callback=planner_progress_callback,
-                    recalculated_success_by_name=recalculated_success_by_name,
-                    sidetrack_window_override=sidetrack_window_overrides_by_key.get(
-                        well_name_key(record.name)
+                prepared_pilot = next(
+                    (
+                        item
+                        for name, item in recalculated_success_by_name.items()
+                        if is_pilot_record(record)
+                        and well_name_key(name) == well_name_key(record.name)
+                        and str(item.summary.get("pilot_planning_mode", ""))
+                        == PILOT_PLANNING_PILOT_FROM_MAIN_BORE
                     ),
-                    actual_reference_wells_by_key=actual_reference_wells_by_key,
+                    None,
                 )
+                main_first_parent = self._main_first_parent_record_for_pilot(
+                    record=record,
+                    selected_records_by_name=selected_records_by_name,
+                    base_config=config,
+                    config_by_name=config_by_name,
+                )
+                if main_first_parent is not None and prepared_pilot is None:
+                    parent_was_retained = any(
+                        well_name_key(name) == well_name_key(main_first_parent.name)
+                        for name in recalculated_success_by_name
+                    )
+                    if parent_was_retained:
+                        prepared_pilot = next(
+                            (
+                                item
+                                for name, item in initial_success_by_name.items()
+                                if well_name_key(name) == well_name_key(record.name)
+                            ),
+                            None,
+                        )
+                if main_first_parent is not None and prepared_pilot is None:
+                    parent_row = next(
+                        (
+                            value
+                            for name, value in evaluated_rows_by_name.items()
+                            if well_name_key(name)
+                            == well_name_key(main_first_parent.name)
+                        ),
+                        {},
+                    )
+                    parent_problem = str(parent_row.get("Проблема", "")).strip()
+                    row = self._base_row(record=record)
+                    row["Статус"] = "Ошибка расчета"
+                    row["Проблема"] = (
+                        f"Пилот {record.name} не рассчитан: основная скважина "
+                        f"{main_first_parent.name} в режиме «Пилот от ГС» "
+                        "не дала готовую траекторию."
+                        + (f" Причина: {parent_problem}" if parent_problem else "")
+                    )
+                    evaluation = (row, None)
+                elif prepared_pilot is not None:
+                    evaluation = (
+                        self._row_from_success(
+                            record=record,
+                            success=prepared_pilot,
+                        ),
+                        prepared_pilot,
+                    )
+                else:
+                    evaluation = self._evaluate_record(
+                        record=record,
+                        config=runtime_override["config"],
+                        optimization_context=runtime_override["optimization_context"],
+                        planner_progress_callback=planner_progress_callback,
+                        recalculated_success_by_name=recalculated_success_by_name,
+                        sidetrack_window_override=(
+                            sidetrack_window_overrides_by_key.get(
+                                well_name_key(record.name)
+                            )
+                        ),
+                        actual_reference_wells_by_key=actual_reference_wells_by_key,
+                        pilot_records_by_key={
+                            well_name_key(item.name): item
+                            for item in selected_records_by_name.values()
+                            if is_pilot_record(item)
+                        },
+                        pilot_configs_by_key={
+                            well_name_key(item.name): (config_by_name or {}).get(
+                                str(item.name), config
+                            )
+                            for item in selected_records_by_name.values()
+                            if is_pilot_record(item)
+                        },
+                    )
                 row, success, updated_pilot_success = _unpack_record_evaluation(
                     evaluation
                 )
-            if missing_pilot is not None:
+            if ambiguous_parent_names or missing_pilot is not None:
                 updated_pilot_success = None
             if success is not None:
                 optimization_context = runtime_override["optimization_context"]
@@ -1315,6 +1570,10 @@ class WelltrackBatchPlanner:
                 if dynamic_cluster_context is not None:
                     current_success_by_name = dict(initial_success_by_name)
                     current_success_by_name.update(recalculated_success_by_name)
+                    if updated_pilot_success is not None:
+                        current_success_by_name[str(updated_pilot_success.name)] = (
+                            updated_pilot_success
+                        )
                     retained_success = (
                         self._select_cluster_monotonic_anticollision_success(
                             candidate_success=success,
@@ -1535,6 +1794,18 @@ class WelltrackBatchPlanner:
         selected_records_by_name = {
             str(record.name): record for record in selected_records
         }
+        pilot_records_by_key = {
+            well_name_key(record.name): record
+            for record in selected_records
+            if is_pilot_record(record)
+        }
+        pilot_configs_by_key = {
+            well_name_key(record.name): (config_by_name or {}).get(
+                str(record.name), config
+            )
+            for record in selected_records
+            if is_pilot_record(record)
+        }
         first_wave_records: list[WelltrackRecord] = []
         dependent_records: list[WelltrackRecord] = []
         for record in selected_records:
@@ -1589,6 +1860,8 @@ class WelltrackBatchPlanner:
                     recalculated_success_by_name=success_by_name,
                     sidetrack_window_override=sidetrack_override,
                     actual_reference_wells_by_key=actual_reference_wells_by_key,
+                    pilot_records_by_key=pilot_records_by_key,
+                    pilot_configs_by_key=pilot_configs_by_key,
                 )
                 row, success, _updated_pilot_success = _unpack_record_evaluation(
                     evaluation
@@ -1656,6 +1929,8 @@ class WelltrackBatchPlanner:
                     recalculated_success_by_name=success_by_name,
                     sidetrack_window_override=sidetrack_override,
                     actual_reference_wells_by_key=actual_reference_wells_by_key,
+                    pilot_records_by_key=pilot_records_by_key,
+                    pilot_configs_by_key=pilot_configs_by_key,
                 )
                 row, success, updated_pilot_success = _unpack_record_evaluation(
                     evaluation
@@ -1687,6 +1962,150 @@ class WelltrackBatchPlanner:
 
         self._last_evaluation_metadata = BatchEvaluationMetadata(
             executed_well_names=tuple(executed_well_names),
+            skipped_selected_names=(),
+            cluster_resolved_early=False,
+            cluster_blocked=False,
+            cluster_blocking_reason=None,
+        )
+        return summary_rows, successes
+
+    def _evaluate_parallel_dependency_groups(
+        self,
+        *,
+        ordered_records: list[WelltrackRecord],
+        dependency_groups: list[list[WelltrackRecord]],
+        config: TrajectoryConfig,
+        config_by_name: dict[str, TrajectoryConfig] | None,
+        optimization_context_by_name: (
+            dict[str, AntiCollisionOptimizationContext] | None
+        ),
+        reference_wells: tuple[ImportedTrajectoryWell, ...],
+        sidetrack_window_overrides_by_key: Mapping[str, SidetrackWindowOverride],
+        progress_callback: ProgressCallback | None,
+        record_done_callback: RecordDoneCallback | None,
+        parallel_workers: int,
+    ) -> tuple[list[dict[str, Any]], list[SuccessfulWellPlan]]:
+        """Run independent pilot dependency groups in separate processes."""
+
+        total = sum(len(group) for group in dependency_groups)
+        workers = min(int(parallel_workers), len(dependency_groups))
+        pool = ProcessPoolExecutor(
+            max_workers=workers,
+            mp_context=process_pool_context(),
+        )
+        future_to_group: dict[Future, list[WelltrackRecord]] = {}
+        try:
+            for group in dependency_groups:
+                group_names = {str(record.name) for record in group}
+                group_config_payload = {
+                    name: item.model_dump()
+                    for name, item in (config_by_name or {}).items()
+                    if name in group_names
+                }
+                group_context_payload = {
+                    name: payload
+                    for name, context in (optimization_context_by_name or {}).items()
+                    if name in group_names
+                    and (payload := _optimization_context_to_worker_payload(context))
+                    is not None
+                }
+                group_override_payload: dict[str, dict[str, object]] = {}
+                for record in group:
+                    override = sidetrack_window_overrides_by_key.get(
+                        well_name_key(record.name)
+                    )
+                    if override is not None:
+                        group_override_payload[str(record.name)] = {
+                            "kind": str(override.kind),
+                            "value_m": float(override.value_m),
+                        }
+                future = pool.submit(
+                    _evaluate_record_group_from_dicts,
+                    tuple(record.model_dump() for record in group),
+                    config.model_dump(),
+                    group_config_payload,
+                    group_context_payload,
+                    (
+                        tuple(well.model_dump() for well in reference_wells)
+                        if any(is_zbs_record(record) for record in group)
+                        else ()
+                    ),
+                    group_override_payload,
+                )
+                future_to_group[future] = group
+
+            rows_by_name: dict[str, dict[str, Any]] = {}
+            successes_by_name: dict[str, SuccessfulWellPlan] = {}
+            completed_count = 0
+            for future in as_completed(future_to_group):
+                group = future_to_group[future]
+                try:
+                    rows, success_dicts, executed_names = future.result()
+                    group_rows = {
+                        well_name_key(row.get("Скважина", "")): row for row in rows
+                    }
+                    group_successes = {
+                        well_name_key(success.name): success
+                        for success in (
+                            SuccessfulWellPlan.model_validate(payload)
+                            for payload in success_dicts
+                        )
+                    }
+                except (BrokenProcessPool, PicklingError):
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    problem = summarize_problem_ru(str(exc))
+                    group_rows = {}
+                    group_successes = {}
+                    executed_names = tuple(str(record.name) for record in group)
+                    for record in group:
+                        row = self._base_row(record=record)
+                        row["Статус"] = "Ошибка расчета"
+                        row["Проблема"] = problem
+                        group_rows[well_name_key(record.name)] = row
+
+                records_by_key = {
+                    well_name_key(record.name): record for record in group
+                }
+                callback_names = tuple(executed_names) or tuple(
+                    str(record.name) for record in group
+                )
+                for name in callback_names:
+                    key = well_name_key(name)
+                    record = records_by_key.get(key)
+                    if record is None:
+                        continue
+                    completed_count += 1
+                    row = group_rows.get(key, self._base_row(record=record))
+                    if progress_callback is not None:
+                        progress_callback(completed_count, total, str(record.name))
+                    if record_done_callback is not None:
+                        record_done_callback(
+                            completed_count,
+                            total,
+                            str(record.name),
+                            row,
+                        )
+
+                rows_by_name.update(group_rows)
+                successes_by_name.update(group_successes)
+        finally:
+            pool.shutdown(wait=True)
+
+        summary_rows = [
+            rows_by_name.get(
+                well_name_key(record.name),
+                self._base_row(record=record),
+            )
+            for record in ordered_records
+        ]
+        successes = [
+            successes_by_name[well_name_key(record.name)]
+            for record in ordered_records
+            if well_name_key(record.name) in successes_by_name
+        ]
+        self._last_evaluation_metadata = BatchEvaluationMetadata(
+            executed_well_names=tuple(str(record.name) for record in ordered_records),
             skipped_selected_names=(),
             cluster_resolved_early=False,
             cluster_blocked=False,
@@ -1935,6 +2354,8 @@ class WelltrackBatchPlanner:
         if not text or text == "—":
             return "—"
         text_lower = text.lower()
+        if "пилот от гс" in text_lower:
+            return "Пилот от ГС"
         if "пилот" in text_lower:
             return "Пилот"
         if "боковой ствол" in text_lower or "факт" in text_lower:
@@ -1969,24 +2390,69 @@ class WelltrackBatchPlanner:
         records: Iterable[WelltrackRecord],
         selected_names: set[str],
         selected_order: list[str] | None,
+        base_config: TrajectoryConfig | None = None,
+        config_by_name: Mapping[str, TrajectoryConfig] | None = None,
     ) -> list[WelltrackRecord]:
         ordered_records = list(records)
         selected_name_keys = {well_name_key(name) for name in selected_names}
         by_name = {well_name_key(record.name): record for record in ordered_records}
         resolved: list[WelltrackRecord] = []
         seen: set[str] = set()
+        legacy_helper_order = base_config is None and config_by_name is None
+
+        def record_config(record: WelltrackRecord) -> TrajectoryConfig:
+            if legacy_helper_order:
+                return TrajectoryConfig(
+                    pilot_planning_mode=PILOT_PLANNING_MAIN_BORE_FROM_PILOT
+                )
+            return (config_by_name or {}).get(
+                str(record.name), base_config or TrajectoryConfig()
+            )
 
         def append_with_pilot(record: WelltrackRecord) -> None:
             name = str(record.name)
             name_key = well_name_key(name)
             if not is_pilot_record(record) and not is_zbs_record(record):
                 pilot = by_name.get(pilot_name_key_for_record(record))
-                if pilot is not None and well_name_key(pilot.name) not in seen:
-                    resolved.append(pilot)
-                    seen.add(well_name_key(pilot.name))
+                main_first = (
+                    str(record_config(record).pilot_planning_mode)
+                    == PILOT_PLANNING_PILOT_FROM_MAIN_BORE
+                )
+                ordered_pair = (record, pilot) if main_first else (pilot, record)
+                for pair_record in ordered_pair:
+                    if pair_record is None:
+                        continue
+                    pair_key = well_name_key(pair_record.name)
+                    if pair_key in seen:
+                        continue
+                    resolved.append(pair_record)
+                    seen.add(pair_key)
+                return
             if name_key not in seen:
                 resolved.append(record)
                 seen.add(name_key)
+
+        def defer_pilot_until_main(record: WelltrackRecord) -> bool:
+            if not is_pilot_record(record):
+                return False
+            pilot_key = well_name_key(record.name)
+            parent = next(
+                (
+                    candidate
+                    for candidate in ordered_records
+                    if not is_pilot_record(candidate)
+                    and not is_zbs_record(candidate)
+                    and well_name_key(candidate.name) in selected_name_keys
+                    and pilot_name_key_for_record(candidate) == pilot_key
+                ),
+                None,
+            )
+            return bool(
+                parent is not None
+                and str(record_config(parent).pilot_planning_mode)
+                == PILOT_PLANNING_PILOT_FROM_MAIN_BORE
+                and well_name_key(parent.name) not in seen
+            )
 
         for name in selected_order or ():
             well_name = str(name)
@@ -1996,27 +2462,192 @@ class WelltrackBatchPlanner:
             ):
                 continue
             record = by_name.get(well_name_key(well_name))
-            if record is None:
+            if record is None or defer_pilot_until_main(record):
                 continue
             append_with_pilot(record)
+
         for record in ordered_records:
             well_name = str(record.name)
             if (
                 well_name_key(well_name) not in selected_name_keys
                 or well_name_key(well_name) in seen
+                or defer_pilot_until_main(record)
             ):
                 continue
             append_with_pilot(record)
-        return order_records_with_pilots_first(resolved)
+
+        # The legacy helper always places pilots first, even when their
+        # parent is explicitly selected first.  Preserve that ordering only
+        # for legacy pairs; main-first pairs keep their dependency order.
+        has_main_first_pair = any(
+            not is_pilot_record(record)
+            and not is_zbs_record(record)
+            and pilot_name_key_for_record(record) in by_name
+            and str(record_config(record).pilot_planning_mode)
+            == PILOT_PLANNING_PILOT_FROM_MAIN_BORE
+            for record in resolved
+        )
+        return (
+            WelltrackBatchPlanner._order_records_by_pilot_mode_dependencies(
+                resolved,
+                base_config=base_config or TrajectoryConfig(),
+                config_by_name=config_by_name,
+            )
+            if has_main_first_pair
+            else order_records_with_pilots_first(resolved)
+        )
+
+    @staticmethod
+    def _order_records_by_pilot_mode_dependencies(
+        records: Iterable[WelltrackRecord],
+        *,
+        base_config: TrajectoryConfig,
+        config_by_name: Mapping[str, TrajectoryConfig] | None,
+    ) -> list[WelltrackRecord]:
+        """Stable topological order for mixed main-first and pilot-first pairs."""
+
+        ordered = list(records)
+        index_by_key = {
+            well_name_key(record.name): index for index, record in enumerate(ordered)
+        }
+        outgoing: list[set[int]] = [set() for _record in ordered]
+        indegree = [0 for _record in ordered]
+        for parent_index, record in enumerate(ordered):
+            if is_pilot_record(record) or is_zbs_record(record):
+                continue
+            pilot_index = index_by_key.get(pilot_name_key_for_record(record))
+            if pilot_index is None:
+                continue
+            record_config = (config_by_name or {}).get(str(record.name), base_config)
+            if (
+                str(record_config.pilot_planning_mode)
+                == PILOT_PLANNING_PILOT_FROM_MAIN_BORE
+            ):
+                before, after = parent_index, pilot_index
+            else:
+                before, after = pilot_index, parent_index
+            if after not in outgoing[before]:
+                outgoing[before].add(after)
+                indegree[after] += 1
+
+        available = [index for index, degree in enumerate(indegree) if degree == 0]
+        result: list[WelltrackRecord] = []
+        while available:
+            current = min(available)
+            available.remove(current)
+            result.append(ordered[current])
+            for dependent in sorted(outgoing[current]):
+                indegree[dependent] -= 1
+                if indegree[dependent] == 0:
+                    available.append(dependent)
+        return result if len(result) == len(ordered) else ordered
 
     @staticmethod
     def _has_pilot_dependencies(records: Iterable[WelltrackRecord]) -> bool:
-        names = {well_name_key(record.name) for record in records}
+        ordered = tuple(records)
+        names = {well_name_key(record.name) for record in ordered}
         return any(
             not is_pilot_record(record)
             and not is_zbs_record(record)
             and pilot_name_key_for_record(record) in names
-            for record in records
+            for record in ordered
+        )
+
+    @staticmethod
+    def _pilot_dependency_groups(
+        records: Iterable[WelltrackRecord],
+    ) -> list[list[WelltrackRecord]]:
+        """Partition records into components linked through one pilot name."""
+
+        ordered = list(records)
+        pilot_indexes_by_key: dict[str, list[int]] = {}
+        for index, record in enumerate(ordered):
+            if is_pilot_record(record):
+                pilot_indexes_by_key.setdefault(well_name_key(record.name), []).append(
+                    index
+                )
+
+        neighbours: list[set[int]] = [set() for _record in ordered]
+        for index, record in enumerate(ordered):
+            if is_pilot_record(record) or is_zbs_record(record):
+                continue
+            for pilot_index in pilot_indexes_by_key.get(
+                pilot_name_key_for_record(record), ()
+            ):
+                neighbours[index].add(pilot_index)
+                neighbours[pilot_index].add(index)
+
+        groups: list[list[WelltrackRecord]] = []
+        visited: set[int] = set()
+        for root_index in range(len(ordered)):
+            if root_index in visited:
+                continue
+            component_indexes: set[int] = set()
+            pending = [root_index]
+            while pending:
+                index = pending.pop()
+                if index in component_indexes:
+                    continue
+                component_indexes.add(index)
+                pending.extend(neighbours[index] - component_indexes)
+            visited.update(component_indexes)
+            groups.append(
+                [
+                    record
+                    for index, record in enumerate(ordered)
+                    if index in component_indexes
+                ]
+            )
+        return groups
+
+    @staticmethod
+    def _has_main_first_pilot_dependencies(
+        records: Iterable[WelltrackRecord],
+        *,
+        base_config: TrajectoryConfig,
+        config_by_name: Mapping[str, TrajectoryConfig] | None,
+    ) -> bool:
+        ordered = tuple(records)
+        names = {well_name_key(record.name) for record in ordered}
+        return any(
+            not is_pilot_record(record)
+            and not is_zbs_record(record)
+            and pilot_name_key_for_record(record) in names
+            and str(
+                (config_by_name or {})
+                .get(str(record.name), base_config)
+                .pilot_planning_mode
+            )
+            == PILOT_PLANNING_PILOT_FROM_MAIN_BORE
+            for record in ordered
+        )
+
+    @staticmethod
+    def _main_first_parent_record_for_pilot(
+        *,
+        record: WelltrackRecord,
+        selected_records_by_name: Mapping[str, WelltrackRecord],
+        base_config: TrajectoryConfig,
+        config_by_name: Mapping[str, TrajectoryConfig] | None,
+    ) -> WelltrackRecord | None:
+        if not is_pilot_record(record):
+            return None
+        pilot_key = well_name_key(record.name)
+        return next(
+            (
+                candidate
+                for candidate in selected_records_by_name.values()
+                if not is_pilot_record(candidate)
+                and not is_zbs_record(candidate)
+                and pilot_name_key_for_record(candidate) == pilot_key
+                and str(
+                    (config_by_name or {})
+                    .get(str(candidate.name), base_config)
+                    .pilot_planning_mode
+                )
+                == PILOT_PLANNING_PILOT_FROM_MAIN_BORE
+            ),
+            None,
         )
 
     def _next_record_for_evaluation(
@@ -2043,6 +2674,25 @@ class WelltrackBatchPlanner:
         if runtime_override is not None:
             record_name = str(runtime_override["well_name"])
             record_for_override = selected_records_by_name[record_name]
+            main_first_parent = self._main_first_parent_record_for_pilot(
+                record=record_for_override,
+                selected_records_by_name=selected_records_by_name,
+                base_config=base_config,
+                config_by_name=config_by_name,
+            )
+            if (
+                main_first_parent is not None
+                and str(main_first_parent.name) in remaining_selected_names
+            ):
+                parent_name = str(main_first_parent.name)
+                return main_first_parent, {
+                    "well_name": parent_name,
+                    "config": (config_by_name or {}).get(parent_name, base_config),
+                    "optimization_context": self._resolve_optimization_context(
+                        context=(optimization_context_by_name or {}).get(parent_name),
+                        recalculated_success_by_name=recalculated_success_by_name,
+                    ),
+                }
             pilot_key = (
                 pilot_name_key_for_record(record_for_override)
                 if not is_zbs_record(record_for_override)
@@ -2056,9 +2706,16 @@ class WelltrackBatchPlanner:
                 ),
                 "",
             )
-            if pilot_name and well_name_key(pilot_name) not in {
-                well_name_key(name) for name in recalculated_success_by_name
-            }:
+            record_config = (config_by_name or {}).get(
+                str(record_for_override.name), base_config
+            )
+            if (
+                pilot_name
+                and well_name_key(pilot_name)
+                not in {well_name_key(name) for name in recalculated_success_by_name}
+                and str(record_config.pilot_planning_mode)
+                == PILOT_PLANNING_MAIN_BORE_FROM_PILOT
+            ):
                 pilot_record = selected_records_by_name[pilot_name]
                 return pilot_record, {
                     "well_name": pilot_name,
@@ -2079,6 +2736,18 @@ class WelltrackBatchPlanner:
             ordered_names[0] if ordered_names else str(remaining_selected_names[0])
         )
         next_record = selected_records_by_name[next_name]
+        main_first_parent = self._main_first_parent_record_for_pilot(
+            record=next_record,
+            selected_records_by_name=selected_records_by_name,
+            base_config=base_config,
+            config_by_name=config_by_name,
+        )
+        if (
+            main_first_parent is not None
+            and str(main_first_parent.name) in remaining_selected_names
+        ):
+            next_name = str(main_first_parent.name)
+            next_record = main_first_parent
         pilot_key = (
             pilot_name_key_for_record(next_record)
             if not is_zbs_record(next_record)
@@ -2092,9 +2761,17 @@ class WelltrackBatchPlanner:
             ),
             "",
         )
-        if pilot_name and well_name_key(pilot_name) not in {
-            well_name_key(name) for name in recalculated_success_by_name
-        }:
+        if (
+            pilot_name
+            and well_name_key(pilot_name)
+            not in {well_name_key(name) for name in recalculated_success_by_name}
+            and str(
+                (config_by_name or {})
+                .get(str(next_record.name), base_config)
+                .pilot_planning_mode
+            )
+            == PILOT_PLANNING_MAIN_BORE_FROM_PILOT
+        ):
             next_name = pilot_name
         record = selected_records_by_name[next_name]
         context = self._resolve_optimization_context(
@@ -2114,8 +2791,14 @@ class WelltrackBatchPlanner:
         record: WelltrackRecord,
         selected_records_by_name: Mapping[str, WelltrackRecord],
         recalculated_success_by_name: Mapping[str, SuccessfulWellPlan],
+        config: TrajectoryConfig | None = None,
     ) -> WelltrackRecord | None:
         if is_pilot_record(record) or is_zbs_record(record):
+            return None
+        if (
+            config is not None
+            and str(config.pilot_planning_mode) == PILOT_PLANNING_PILOT_FROM_MAIN_BORE
+        ):
             return None
         pilot_key = pilot_name_key_for_record(record)
         pilot_record = next(
@@ -2535,6 +3218,8 @@ class WelltrackBatchPlanner:
         actual_reference_wells_by_key: (
             Mapping[str, ImportedTrajectoryWell] | None
         ) = None,
+        pilot_records_by_key: Mapping[str, WelltrackRecord] | None = None,
+        pilot_configs_by_key: Mapping[str, TrajectoryConfig] | None = None,
     ) -> tuple[dict[str, Any], SuccessfulWellPlan | None] | RecordEvaluationResult:
         if is_pilot_record(record):
             return self._evaluate_pilot_record(record=record, config=config)
@@ -2572,142 +3257,317 @@ class WelltrackBatchPlanner:
                 ),
                 None,
             )
-            use_pilot_sidetrack = pilot_success is not None
+            pilot_record = (pilot_records_by_key or {}).get(pilot_key)
+            use_pilot_sidetrack = pilot_success is not None or pilot_record is not None
             updated_pilot_success: SuccessfulWellPlan | None = None
+            multi_targets_already_extended = False
             if use_pilot_sidetrack:
-
-                def validate_complete_candidate(
-                    pilot_stations: pd.DataFrame,
-                    window: PilotWindow,
-                    sidetrack_result: PlannerResult,
-                ) -> PlannerResult:
-                    return _build_complete_sidetrack_candidate(
-                        pilot_stations,
-                        window,
-                        sidetrack_result,
-                        config=config,
-                        target_sequence=layout.target_sequence,
-                        target_sequence_numbers=layout.target_sequence_numbers,
-                        horizontal_start_at_second_target=(
-                            layout.target_sequence_has_horizontal_start
-                        ),
-                        target_pairs=target_pairs,
+                if (
+                    str(config.pilot_planning_mode)
+                    == PILOT_PLANNING_PILOT_FROM_MAIN_BORE
+                ):
+                    if pilot_record is None:
+                        if pilot_success is None:
+                            raise ValueError(
+                                "Не найдена запись пилота для режима «Пилот от ГС»."
+                            )
+                        pilot_target_points = tuple(pilot_success.target_points)
+                        pilot_name = str(pilot_success.name)
+                        pilot_config = pilot_success.config
+                    else:
+                        pilot_problem = pilot_record_problem_text(pilot_record)
+                        if pilot_problem != "—":
+                            raise ValueError(
+                                f"Пилот {pilot_record.name}: {pilot_problem}"
+                            )
+                        pilot_target_points = tuple(
+                            Point3D(
+                                x=float(point.x),
+                                y=float(point.y),
+                                z=float(point.z),
+                            )
+                            for point in tuple(pilot_record.points)
+                        )
+                        pilot_name = str(pilot_record.name)
+                        pilot_config = (pilot_configs_by_key or {}).get(
+                            pilot_key, config
+                        )
+                    optimization_context = (
+                        _optimization_context_without_reference_wells(
+                            context=optimization_context,
+                            excluded_well_names=(pilot_name,),
+                        )
                     )
-
-                try:
-                    window, sidetrack_result = select_sidetrack_window(
-                        pilot_name=str(pilot_success.name),
-                        parent_name=str(record.name),
-                        pilot_stations=pilot_success.stations,
-                        parent_t1=t1,
-                        parent_t3=t3,
-                        config=config,
-                        planner=self._planner,
-                        optimization_context=optimization_context,
-                        window_override=sidetrack_window_override,
-                        candidate_validator=validate_complete_candidate,
-                    )
-                except (ValueError, PlanningError):
-                    # A manual window is an explicit engineering constraint:
-                    # never silently move it or mutate the parent pilot.
-                    if sidetrack_window_override is not None:
-                        raise
-                    productive_direction_target = (
-                        layout.target_sequence[1]
-                        if len(layout.target_sequence) >= 2
-                        else t3
-                    )
-                    fallback = plan_reoriented_pilot_sidetrack_fallback(
-                        pilot_name=str(pilot_success.name),
-                        parent_name=str(record.name),
-                        pilot_target_points=tuple(pilot_success.target_points),
-                        parent_t1=t1,
-                        parent_t3=t3,
-                        productive_direction_target=productive_direction_target,
-                        pilot_config=pilot_success.config,
-                        sidetrack_config=config,
-                        optimization_context=optimization_context,
-                        candidate_validator=validate_complete_candidate,
-                    )
-                    window = fallback.window
-                    sidetrack_result = fallback.sidetrack_result
-                    updated_pilot_success = _pilot_build_result_to_updated_success(
-                        existing=pilot_success,
-                        pilot=fallback.pilot,
-                    )
-                sidetrack = combine_pilot_and_sidetrack(
-                    pilot_stations=(
-                        updated_pilot_success.stations
-                        if updated_pilot_success is not None
-                        else pilot_success.stations
-                    ),
-                    sidetrack_result=sidetrack_result,
-                    window=window,
-                    config=config,
-                )
-                stations = sidetrack.stations
-                summary = dict(sidetrack.summary)
-                md_t1_m = float(sidetrack.md_t1_m)
-                azimuth_deg = float(sidetrack.azimuth_deg)
-                success_surface = sidetrack.window.point
-                if updated_pilot_success is not None:
-                    summary.update(
-                        {
-                            "solver_strategy": (
-                                "pilot_sidetrack_reoriented_pilot_fallback"
-                            ),
-                            "sidetrack_fallback_used": "yes",
-                            "pilot_reorientation_fallback_used": "yes",
-                            "pilot_reorientation_target_azi_deg": float(
-                                fallback.target_azimuth_deg
-                            ),
-                            "pilot_reorientation_geometry_seed_source": str(
-                                fallback.geometry_seed_source
-                            ),
-                            "pilot_reorientation_geometry_seed_azi_deg": float(
-                                fallback.geometry_seed_azimuth_deg
-                            ),
-                            "pilot_reorientation_geometry_seed_inc_deg": float(
-                                fallback.geometry_seed_inc_deg
-                            ),
-                            "pilot_reorientation_geometry_seed_md_total_m": float(
-                                fallback.geometry_seed_md_total_m
-                            ),
-                            "pilot_replanned_md_total_m": float(
-                                fallback.pilot.md_total_m
-                            ),
-                            "pilot_total_md_m": float(fallback.pilot.md_total_m),
-                            "total_drilled_md_m": float(fallback.total_drilled_md_m),
-                            "total_drilled_footage_m": float(
-                                fallback.total_drilled_md_m
-                            ),
-                            "sidetrack_window_optimization_objective_m": float(
-                                fallback.total_drilled_md_m
+                    if layout.target_sequence:
+                        main_plan_kwargs = {
+                            "surface": surface,
+                            "targets": layout.target_sequence,
+                            "target_numbers": layout.target_sequence_numbers,
+                            "config": config,
+                            "progress_callback": planner_progress_callback,
+                            "horizontal_start_at_second_target": (
+                                layout.target_sequence_has_horizontal_start
                             ),
                         }
+                        if optimization_context is not None:
+                            main_plan_kwargs["optimization_context"] = (
+                                optimization_context
+                            )
+                        main_bore = self._planner.plan_multi_target(**main_plan_kwargs)
+                        t3 = layout.final_target
+                    else:
+                        main_plan_kwargs = {
+                            "surface": surface,
+                            "t1": t1,
+                            "t3": t3,
+                            "config": config,
+                            "progress_callback": planner_progress_callback,
+                        }
+                        if optimization_context is not None:
+                            main_plan_kwargs["optimization_context"] = (
+                                optimization_context
+                            )
+                        main_bore = self._planner.plan(**main_plan_kwargs)
+                        if len(target_pairs) > 1:
+                            main_bore = extend_plan_with_multi_horizontal_targets(
+                                base_result=main_bore,
+                                target_pairs=target_pairs,
+                                config=config,
+                            )
+                            multi_targets_already_extended = True
+                            t3 = layout.final_target
+
+                    pilot_from_main = plan_pilot_from_main_bore(
+                        pilot_name=pilot_name,
+                        parent_name=str(record.name),
+                        pilot_target_points=pilot_target_points,
+                        main_bore=main_bore,
+                        pilot_config=pilot_config,
+                        main_config=config,
+                        window_override=sidetrack_window_override,
+                        optimization_context=optimization_context,
                     )
-                if layout.target_sequence:
-                    extended_result = extend_plan_with_target_sequence(
-                        base_result=PlannerResult(
-                            stations=stations,
-                            summary=summary,
-                            azimuth_deg=azimuth_deg,
-                            md_t1_m=md_t1_m,
+                    if pilot_success is not None:
+                        updated_pilot_success = _pilot_build_result_to_updated_success(
+                            existing=pilot_success,
+                            pilot=pilot_from_main.pilot,
+                        )
+                    elif pilot_record is not None:
+                        updated_pilot_success = _pilot_build_to_success(
+                            record=pilot_record,
+                            pilot=pilot_from_main.pilot,
+                            config=pilot_config,
+                            runtime_s=0.0,
+                        )
+                    window = pilot_from_main.window
+                    stations = main_bore.stations.copy()
+                    summary = dict(main_bore.summary)
+                    md_t1_m = float(main_bore.md_t1_m)
+                    azimuth_deg = float(main_bore.azimuth_deg)
+                    success_surface = surface
+                    main_md_total_m = float(stations["MD_m"].iloc[-1])
+                    sidetrack_lateral_md_m = main_md_total_m - float(window.md_m)
+                    complexity = str(summary.get("well_complexity", "")).strip()
+                    complexity = (
+                        f"{complexity}; пилот от ГС" if complexity else "Пилот от ГС"
+                    )
+                    summary.update(
+                        {
+                            "trajectory_type": "PILOT_SIDETRACK",
+                            "trajectory_target_direction": "Пилот от ГС",
+                            "well_complexity": complexity,
+                            "solver_strategy": "pilot_from_main_bore",
+                            "pilot_planning_mode": str(config.pilot_planning_mode),
+                            "pilot_well_name": pilot_name,
+                            "sidetrack_parent_well_name": pilot_name,
+                            "sidetrack_window_md_m": float(window.md_m),
+                            "sidetrack_window_x_m": float(window.point.x),
+                            "sidetrack_window_y_m": float(window.point.y),
+                            "sidetrack_window_z_m": float(window.point.z),
+                            "sidetrack_window_inc_deg": float(window.inc_deg),
+                            "sidetrack_window_azi_deg": float(window.azi_deg),
+                            "sidetrack_lateral_md_m": sidetrack_lateral_md_m,
+                            "sidetrack_complete_lateral_md_m": (sidetrack_lateral_md_m),
+                            "sidetrack_total_md_m": main_md_total_m,
+                            "pilot_total_md_m": float(pilot_from_main.pilot.md_total_m),
+                            "total_drilled_md_m": float(
+                                pilot_from_main.total_drilled_md_m
+                            ),
+                            "total_drilled_footage_m": float(
+                                pilot_from_main.total_drilled_md_m
+                            ),
+                            "sidetrack_window_optimization_objective_m": float(
+                                pilot_from_main.total_drilled_md_m
+                            ),
+                            "pilot_tail_md_from_window_m": float(
+                                pilot_from_main.pilot_tail_md_m
+                            ),
+                            "pilot_window_distance_to_first_pl_m": float(
+                                pilot_from_main.window_to_first_pl_m
+                            ),
+                            "pilot_window_search_resolution_m": float(
+                                pilot_from_main.window_search_resolution_m
+                            ),
+                            "pilot_leg_dls_deg_per_30m": str(
+                                pilot_from_main.pilot.summary.get(
+                                    "pilot_leg_dls_deg_per_30m",
+                                    "",
+                                )
+                            ),
+                            "pilot_tail_optimization": str(
+                                pilot_from_main.pilot.summary.get(
+                                    "pilot_tail_optimization",
+                                    "",
+                                )
+                            ),
+                            "pilot_window_selection_objective": (
+                                "min_total_drilled_md_then_first_pl_proximity"
+                            ),
+                            "md_total_m": main_md_total_m,
+                        }
+                    )
+                else:
+                    if pilot_success is None:
+                        raise ValueError(
+                            "Сначала рассчитайте пилот: режим «ГС от пилота» "
+                            "требует готовую траекторию пилота."
+                        )
+
+                    def validate_complete_candidate(
+                        pilot_stations: pd.DataFrame,
+                        window: PilotWindow,
+                        sidetrack_result: PlannerResult,
+                    ) -> PlannerResult:
+                        return _build_complete_sidetrack_candidate(
+                            pilot_stations,
+                            window,
+                            sidetrack_result,
+                            config=config,
+                            target_sequence=layout.target_sequence,
+                            target_sequence_numbers=layout.target_sequence_numbers,
+                            horizontal_start_at_second_target=(
+                                layout.target_sequence_has_horizontal_start
+                            ),
+                            target_pairs=target_pairs,
+                        )
+
+                    try:
+                        window, sidetrack_result = select_sidetrack_window(
+                            pilot_name=str(pilot_success.name),
+                            parent_name=str(record.name),
+                            pilot_stations=pilot_success.stations,
+                            parent_t1=t1,
+                            parent_t3=t3,
+                            config=config,
+                            planner=self._planner,
+                            optimization_context=optimization_context,
+                            window_override=sidetrack_window_override,
+                            candidate_validator=validate_complete_candidate,
+                        )
+                    except (ValueError, PlanningError):
+                        # A manual window is an explicit engineering constraint:
+                        # never silently move it or mutate the parent pilot.
+                        if sidetrack_window_override is not None:
+                            raise
+                        productive_direction_target = (
+                            layout.target_sequence[1]
+                            if len(layout.target_sequence) >= 2
+                            else t3
+                        )
+                        fallback = plan_reoriented_pilot_sidetrack_fallback(
+                            pilot_name=str(pilot_success.name),
+                            parent_name=str(record.name),
+                            pilot_target_points=tuple(pilot_success.target_points),
+                            parent_t1=t1,
+                            parent_t3=t3,
+                            productive_direction_target=productive_direction_target,
+                            pilot_config=pilot_success.config,
+                            sidetrack_config=config,
+                            optimization_context=optimization_context,
+                            candidate_validator=validate_complete_candidate,
+                        )
+                        window = fallback.window
+                        sidetrack_result = fallback.sidetrack_result
+                        updated_pilot_success = _pilot_build_result_to_updated_success(
+                            existing=pilot_success,
+                            pilot=fallback.pilot,
+                        )
+                    sidetrack = combine_pilot_and_sidetrack(
+                        pilot_stations=(
+                            updated_pilot_success.stations
+                            if updated_pilot_success is not None
+                            else pilot_success.stations
                         ),
-                        targets=layout.target_sequence,
-                        target_numbers=layout.target_sequence_numbers,
+                        sidetrack_result=sidetrack_result,
+                        window=window,
                         config=config,
-                        progress_callback=planner_progress_callback,
-                        trajectory_type="PILOT_SIDETRACK",
-                        horizontal_start_at_second_target=(
-                            layout.target_sequence_has_horizontal_start
-                        ),
                     )
-                    stations = extended_result.stations
-                    summary = dict(extended_result.summary)
-                    md_t1_m = float(extended_result.md_t1_m)
-                    azimuth_deg = float(extended_result.azimuth_deg)
-                    t3 = layout.final_target
+                    stations = sidetrack.stations
+                    summary = dict(sidetrack.summary)
+                    summary["pilot_planning_mode"] = str(config.pilot_planning_mode)
+                    md_t1_m = float(sidetrack.md_t1_m)
+                    azimuth_deg = float(sidetrack.azimuth_deg)
+                    success_surface = sidetrack.window.point
+                    if updated_pilot_success is not None:
+                        summary.update(
+                            {
+                                "solver_strategy": (
+                                    "pilot_sidetrack_reoriented_pilot_fallback"
+                                ),
+                                "sidetrack_fallback_used": "yes",
+                                "pilot_reorientation_fallback_used": "yes",
+                                "pilot_reorientation_target_azi_deg": float(
+                                    fallback.target_azimuth_deg
+                                ),
+                                "pilot_reorientation_geometry_seed_source": str(
+                                    fallback.geometry_seed_source
+                                ),
+                                "pilot_reorientation_geometry_seed_azi_deg": float(
+                                    fallback.geometry_seed_azimuth_deg
+                                ),
+                                "pilot_reorientation_geometry_seed_inc_deg": float(
+                                    fallback.geometry_seed_inc_deg
+                                ),
+                                "pilot_reorientation_geometry_seed_md_total_m": float(
+                                    fallback.geometry_seed_md_total_m
+                                ),
+                                "pilot_replanned_md_total_m": float(
+                                    fallback.pilot.md_total_m
+                                ),
+                                "pilot_total_md_m": float(fallback.pilot.md_total_m),
+                                "total_drilled_md_m": float(
+                                    fallback.total_drilled_md_m
+                                ),
+                                "total_drilled_footage_m": float(
+                                    fallback.total_drilled_md_m
+                                ),
+                                "sidetrack_window_optimization_objective_m": float(
+                                    fallback.total_drilled_md_m
+                                ),
+                            }
+                        )
+                    if layout.target_sequence:
+                        extended_result = extend_plan_with_target_sequence(
+                            base_result=PlannerResult(
+                                stations=stations,
+                                summary=summary,
+                                azimuth_deg=azimuth_deg,
+                                md_t1_m=md_t1_m,
+                            ),
+                            targets=layout.target_sequence,
+                            target_numbers=layout.target_sequence_numbers,
+                            config=config,
+                            progress_callback=planner_progress_callback,
+                            trajectory_type="PILOT_SIDETRACK",
+                            horizontal_start_at_second_target=(
+                                layout.target_sequence_has_horizontal_start
+                            ),
+                        )
+                        stations = extended_result.stations
+                        summary = dict(extended_result.summary)
+                        md_t1_m = float(extended_result.md_t1_m)
+                        azimuth_deg = float(extended_result.azimuth_deg)
+                        t3 = layout.final_target
             else:
                 if layout.target_sequence:
                     plan_kwargs = {
@@ -2739,7 +3599,7 @@ class WelltrackBatchPlanner:
                 summary = dict(result.summary)
                 md_t1_m = float(result.md_t1_m)
                 azimuth_deg = float(result.azimuth_deg)
-            if len(target_pairs) > 1:
+            if len(target_pairs) > 1 and not multi_targets_already_extended:
                 base_result = PlannerResult(
                     stations=stations,
                     summary=summary,

@@ -7,7 +7,13 @@ from typing import Callable, Iterable, Literal
 
 import numpy as np
 import pandas as pd
-from scipy.optimize import least_squares
+from scipy.optimize import (
+    brentq,
+    differential_evolution,
+    least_squares,
+    minimize,
+    minimize_scalar,
+)
 
 import pywp.well_names as well_name_utils
 from pywp.anticollision_optimization import (
@@ -23,7 +29,13 @@ from pywp.mcm import (
     dogleg_angle_rad,
     minimum_curvature_increment,
 )
-from pywp.models import PlannerResult, Point3D, SummaryDict, TrajectoryConfig
+from pywp.models import (
+    PILOT_PLANNING_PILOT_FROM_MAIN_BORE,
+    PlannerResult,
+    Point3D,
+    SummaryDict,
+    TrajectoryConfig,
+)
 from pywp.planner import TrajectoryPlanner
 from pywp.planner_types import PlanningError
 from pywp.pydantic_base import FrozenArbitraryModel
@@ -37,6 +49,8 @@ ZBS_SUFFIX = well_name_utils.ZBS_SUFFIX
 ALT_BRANCH_SUFFIX = well_name_utils.ALT_BRANCH_SUFFIX
 SIDETRACK_WINDOW_ABOVE_FIRST_TARGET_MIN_M = 50.0
 SIDETRACK_WINDOW_ABOVE_FIRST_TARGET_MAX_M = 100.0
+_MAX_PILOT_WINDOW_COARSE_CANDIDATES = 240
+_PILOT_NUMERICAL_DLS_FLOOR_DEG_PER_30M = 0.1
 _SURFACE_POINT_LABELS = {
     "s",
     "s1",
@@ -154,6 +168,1304 @@ class ReorientedPilotSidetrackPlan:
     geometry_seed_inc_deg: float = 0.0
     geometry_seed_md_total_m: float = 0.0
     sidetrack_lateral_md_m: float = 0.0
+
+
+@dataclass(frozen=True)
+class PilotFromMainBorePlan:
+    pilot: PilotBuildResult
+    window: PilotWindow
+    main_bore: PlannerResult
+    total_drilled_md_m: float
+    pilot_tail_md_m: float
+    window_to_first_pl_m: float
+    window_search_resolution_m: float
+
+
+@dataclass(frozen=True)
+class _PilotTailGeometry:
+    extra_md_m: float
+    first_leg_md_m: float
+    dls_deg_per_30m: tuple[float, ...]
+
+
+@dataclass(frozen=True)
+class _PilotWindowTailGeometry:
+    window: PilotWindow
+    tail: _PilotTailGeometry
+    lower_bound_m: float
+
+
+def plan_pilot_from_main_bore(
+    *,
+    pilot_name: str,
+    parent_name: str,
+    pilot_target_points: tuple[Point3D, ...],
+    main_bore: PlannerResult,
+    pilot_config: TrajectoryConfig,
+    main_config: TrajectoryConfig,
+    window_override: SidetrackWindowOverride | None = None,
+    optimization_context: AntiCollisionOptimizationContext | None = None,
+) -> PilotFromMainBorePlan:
+    """Branch the pilot from a fully planned productive bore, minimizing drilled footage."""
+
+    if len(pilot_target_points) < 2:
+        raise ValueError("Пилоту нужны устье и минимум одна точка PL.")
+    stations = main_bore.stations
+    required = ("MD_m", "INC_deg", "AZI_deg", "X_m", "Y_m", "Z_m")
+    if (
+        not isinstance(stations, pd.DataFrame)
+        or len(stations) < 3
+        or not set(required).issubset(stations)
+    ):
+        raise ValueError(
+            "Классическая ГС не содержит полной инклинометрии MD/INC/AZI/X/Y/Z."
+        )
+    survey = stations[list(required)].to_numpy(dtype=float)
+    md_values = stations["MD_m"].to_numpy(dtype=float)
+    if (
+        np.any(~np.isfinite(survey))
+        or abs(float(md_values[0])) > 1e-6
+        or np.any(np.diff(md_values) <= SMALL)
+    ):
+        raise ValueError(
+            "Классическая ГС содержит некорректный или не возрастающий MD."
+        )
+    if np.linalg.norm(survey[0, 3:6] - _point_array(pilot_target_points[0])) > 1e-3:
+        raise ValueError("Устье пилота не совпадает с устьем классической ГС.")
+    if any(
+        np.linalg.norm(_point_array(left) - _point_array(right)) <= SMALL
+        for left, right in zip(pilot_target_points, pilot_target_points[1:])
+    ):
+        raise ValueError("Пилот содержит совпадающие соседние точки.")
+    md_t1 = float(main_bore.md_t1_m)
+    if not math.isfinite(md_t1) or md_t1 <= 0.0 or md_t1 > float(md_values[-1]) + SMALL:
+        raise ValueError("MD первой цели классической ГС вне диапазона инклинометрии.")
+
+    min_md = max(
+        float(pilot_config.min_structural_segment_m),
+        float(main_config.min_structural_segment_m),
+    )
+    max_md = md_t1 - float(main_config.min_structural_segment_m)
+    if max_md <= min_md:
+        raise ValueError("Между устьем и t1 недостаточно места для окна пилота.")
+    pl1_xyz = _point_array(pilot_target_points[1])
+    fixed_tail_lower_bound = sum(
+        float(np.linalg.norm(_point_array(right) - _point_array(left)))
+        for left, right in zip(pilot_target_points[1:-1], pilot_target_points[2:])
+    )
+
+    if window_override is not None:
+        if window_override.kind == "md":
+            requested_row = _interpolate_main_bore_window_by_md(
+                stations, float(window_override.value_m), md_values
+            )
+        else:
+            requested_row = _interpolate_main_bore_window_by_z(
+                stations,
+                float(window_override.value_m),
+                md_values,
+                min_md_m=min_md,
+                max_md_m=max_md,
+            )
+        requested_window = PilotWindow.from_station(
+            pilot_name=pilot_name,
+            parent_name=parent_name,
+            row=requested_row,
+        )
+        if not min_md - SMALL <= float(requested_window.md_m) <= max_md + SMALL:
+            raise ValueError(
+                "Ручное окно пилота должно находиться до t1 и после "
+                "минимального участка от устья."
+            )
+        candidate_mds = [float(requested_window.md_m)]
+    else:
+        eligible = (md_values >= min_md) & (md_values <= max_md)
+        eligible_md = md_values[eligible]
+        eligible_xyz = stations.loc[eligible, ["X_m", "Y_m", "Z_m"]].to_numpy(
+            dtype=float
+        )
+        nearest = (
+            float(
+                eligible_md[
+                    int(np.argmin(np.linalg.norm(eligible_xyz - pl1_xyz, axis=1)))
+                ]
+            )
+            if len(eligible_md)
+            else min_md
+        )
+        # Find a good feasible upper bound quickly around survey stations and
+        # the geometric nearest point.  A second exhaustive control grid below
+        # then proves the best window at the configured MD resolution.
+        survey_candidates = (
+            eligible_md
+            if len(eligible_md) <= _MAX_PILOT_WINDOW_COARSE_CANDIDATES
+            else eligible_md[
+                np.linspace(
+                    0,
+                    len(eligible_md) - 1,
+                    _MAX_PILOT_WINDOW_COARSE_CANDIDATES,
+                    dtype=int,
+                )
+            ]
+        )
+        spacing = max(
+            (max_md - min_md) / (_MAX_PILOT_WINDOW_COARSE_CANDIDATES - 1),
+            float(main_config.md_step_m),
+        )
+        local = np.linspace(
+            max(min_md, nearest - 2.0 * spacing),
+            min(max_md, nearest + 2.0 * spacing),
+            17,
+        )
+        candidate_mds = list(
+            {float(md) for md in (*survey_candidates, *local, min_md, max_md)}
+        )
+
+        def proximity_lower_bound(md: float) -> float:
+            try:
+                row = _interpolate_main_bore_window_by_md(stations, md, md_values)
+            except (ValueError, ArithmeticError):
+                return float("inf")
+            if float(row["Z_m"]) >= float(pilot_target_points[1].z) - SMALL:
+                return float("inf")
+            xyz = np.asarray([row["X_m"], row["Y_m"], row["Z_m"]], dtype=float)
+            return float(np.linalg.norm(xyz - pl1_xyz)) + fixed_tail_lower_bound
+
+        # A close window establishes a strong feasible upper bound early;
+        # distant candidates can then be rejected by their geometric bound.
+        candidate_mds.sort(key=lambda md: (proximity_lower_bound(md), -md))
+
+    best: tuple[tuple[float, float, float], PilotBuildResult, PilotWindow] | None = None
+    evaluated: set[float] = set()
+    raw_scores_by_md: dict[float, tuple[float, float, float]] = {}
+    scored_candidates_by_md: dict[float, tuple[float, float, float]] = {}
+    window_candidates_by_md: dict[float, tuple[float, PilotWindow, float]] = {}
+    last_problem = ""
+    main_md = float(md_values[-1])
+
+    def evaluate(md: float) -> None:
+        nonlocal best, last_problem
+        md = float(md)
+        md_key = round(md, 6)
+        if md_key in evaluated:
+            return
+        evaluated.add(md_key)
+        try:
+            row = _interpolate_main_bore_window_by_md(stations, md, md_values)
+            window = PilotWindow.from_station(
+                pilot_name=pilot_name, parent_name=parent_name, row=row
+            )
+            if float(window.point.z) >= float(pilot_target_points[1].z) - SMALL:
+                raise ValueError("Окно находится не выше первой PL-точки.")
+            # The main bore is already fixed: only the additional pilot tail
+            # varies with the window, so this is a strict lower bound on cost.
+            lower_bound = (
+                float(np.linalg.norm(_point_array(window.point) - pl1_xyz))
+                + fixed_tail_lower_bound
+            )
+            window_candidates_by_md[md_key] = (md, window, lower_bound)
+            if best is not None and lower_bound > best[0][0] - main_md + 1e-6:
+                return
+            tail_geometry = _exact_pilot_tail_geometry(
+                start=window.point,
+                start_inc_deg=float(window.inc_deg),
+                start_azi_deg=float(window.azi_deg),
+                study_points=pilot_target_points[1:],
+                config=pilot_config,
+            )
+            first_leg_md = float(tail_geometry.first_leg_md_m)
+            if first_leg_md < float(pilot_config.min_structural_segment_m) - SMALL:
+                raise ValueError("Первый участок пилота от окна слишком короткий.")
+            raw_score = main_md + float(tail_geometry.extra_md_m)
+            raw_scores_by_md[md_key] = (md, raw_score, lower_bound)
+            # The closed-form BUILD+HOLD geometry is the same model used to
+            # materialize the survey below.  Avoid constructing a DataFrame
+            # for candidates that cannot beat the current result.  An
+            # anti-collision penalty is non-negative, so its incumbent score
+            # remains a valid pruning upper bound as well.
+            if best is not None:
+                if optimization_context is None:
+                    score_delta = raw_score - best[0][0]
+                    if score_delta > 1e-6 or (
+                        abs(score_delta) <= 1e-6 and (lower_bound, -md) >= best[0][1:]
+                    ):
+                        return
+                elif raw_score > best[0][0] + 1e-6:
+                    return
+            pilot = _pilot_from_main_bore_window(
+                main_stations=stations,
+                window=window,
+                study_points=pilot_target_points[1:],
+                pilot_config=pilot_config,
+                main_config=main_config,
+                dls_values_deg_per_30m=tail_geometry.dls_deg_per_30m,
+            )
+            extra_md = float(pilot.md_total_m) - md
+            score = main_md + extra_md
+            if optimization_context is not None:
+                score += _trajectory_anticollision_penalty(
+                    stations=pilot.stations, optimization_context=optimization_context
+                )
+            key = (score, lower_bound, -md)
+            scored_candidates_by_md[md_key] = (md, score, lower_bound)
+            if best is None or key < best[0]:
+                best = (key, pilot, window)
+        except (ValueError, PlanningError, ArithmeticError) as exc:
+            last_problem = str(exc)
+
+    optimized_evaluated: set[float] = set()
+    optimized_scores_by_md: dict[float, tuple[float, float, float]] = {}
+
+    def evaluate_joint_tail(md: float) -> None:
+        nonlocal best, last_problem
+        md = float(md)
+        md_key = round(md, 6)
+        if md_key in optimized_evaluated:
+            return
+        optimized_evaluated.add(md_key)
+        candidate = window_candidates_by_md.get(md_key)
+        if candidate is None:
+            try:
+                row = _interpolate_main_bore_window_by_md(stations, md, md_values)
+                window = PilotWindow.from_station(
+                    pilot_name=pilot_name,
+                    parent_name=parent_name,
+                    row=row,
+                )
+                if float(window.point.z) >= float(pilot_target_points[1].z) - SMALL:
+                    raise ValueError("Окно находится не выше первой PL-точки.")
+                lower_bound = (
+                    float(np.linalg.norm(_point_array(window.point) - pl1_xyz))
+                    + fixed_tail_lower_bound
+                )
+                candidate = (md, window, lower_bound)
+                window_candidates_by_md[md_key] = candidate
+            except (ValueError, PlanningError, ArithmeticError) as exc:
+                last_problem = str(exc)
+                return
+        _, window, lower_bound = candidate
+        if best is not None and lower_bound > best[0][0] - main_md + 1e-6:
+            return
+        try:
+            tail_geometry = _optimized_pilot_tail_geometry(
+                start=window.point,
+                start_inc_deg=float(window.inc_deg),
+                start_azi_deg=float(window.azi_deg),
+                study_points=pilot_target_points[1:],
+                config=pilot_config,
+            )
+            raw_score = main_md + float(tail_geometry.extra_md_m)
+            if best is not None:
+                if optimization_context is None:
+                    score_delta = raw_score - best[0][0]
+                    if score_delta > 1e-6 or (
+                        abs(score_delta) <= 1e-6 and (lower_bound, -md) >= best[0][1:]
+                    ):
+                        optimized_scores_by_md[md_key] = (
+                            md,
+                            raw_score,
+                            lower_bound,
+                        )
+                        return
+                elif raw_score > best[0][0] + 1e-6:
+                    return
+            pilot = _pilot_from_main_bore_window(
+                main_stations=stations,
+                window=window,
+                study_points=pilot_target_points[1:],
+                pilot_config=pilot_config,
+                main_config=main_config,
+                dls_values_deg_per_30m=tail_geometry.dls_deg_per_30m,
+            )
+            score = main_md + float(pilot.md_total_m) - md
+            if optimization_context is not None:
+                score += _trajectory_anticollision_penalty(
+                    stations=pilot.stations,
+                    optimization_context=optimization_context,
+                )
+            key = (score, lower_bound, -md)
+            optimized_scores_by_md[md_key] = (md, score, lower_bound)
+            if best is None or key < best[0]:
+                best = (key, pilot, window)
+        except (ValueError, PlanningError, ArithmeticError) as exc:
+            last_problem = str(exc)
+
+    for md in candidate_mds:
+        evaluate(md)
+    if window_override is None:
+        # Both configurations constrain the branch.  Use the finer control
+        # grid so a per-well pilot setting cannot hide a better window between
+        # the main-bore control stations.
+        control_step = min(
+            float(main_config.md_step_control_m),
+            float(pilot_config.md_step_control_m),
+        )
+        grid_count = int(math.floor((max_md - min_md) / control_step)) + 1
+        control_grid = [min_md + index * control_step for index in range(grid_count)]
+        if control_grid[-1] < max_md - SMALL:
+            control_grid.append(max_md)
+        control_grid.sort(key=lambda md: (proximity_lower_bound(md), -md))
+        for md in control_grid:
+            evaluate(md)
+
+        # The control grid guarantees the configured engineering resolution.
+        # Refine every feasible local minimum, including minima at the edge of
+        # a disconnected feasibility interval.  Refining only the winning grid
+        # cell can miss a lower minimum between nodes when multiple PL points
+        # or an INC constraint make the one-dimensional objective multimodal.
+        if best is not None:
+            local_step = max(control_step / 10.0, 0.01)
+            search_scores = (
+                raw_scores_by_md
+                if optimization_context is None
+                else scored_candidates_by_md
+            )
+            refinement_centers = _pilot_window_local_minimum_mds(
+                tuple(search_scores.values()),
+                control_step_m=control_step,
+            )
+            refinement_centers.add(float(best[2].md_m))
+            refinement_mds: set[float] = set()
+            for center_md in refinement_centers:
+                left = max(min_md, center_md - control_step)
+                right = min(max_md, center_md + control_step)
+                local_count = int(math.ceil((right - left) / local_step)) + 1
+                refinement_mds.update(
+                    float(md) for md in np.linspace(left, right, local_count)
+                )
+            for md in sorted(
+                refinement_mds,
+                key=lambda candidate_md: (
+                    proximity_lower_bound(candidate_md),
+                    -candidate_md,
+                ),
+            ):
+                evaluate(md)
+    if len(pilot_target_points) > 2:
+        if window_override is not None or len(pilot_target_points) == 3:
+            for md, _window, lower_bound in sorted(
+                window_candidates_by_md.values(),
+                key=lambda item: (item[2], -item[0]),
+            ):
+                if best is not None and lower_bound > best[0][0] - main_md + 1e-6:
+                    continue
+                evaluate_joint_tail(md)
+            if window_override is None and best is not None and optimized_scores_by_md:
+                joint_refinement_centers = _pilot_window_local_minimum_mds(
+                    tuple(optimized_scores_by_md.values()),
+                    control_step_m=control_step,
+                )
+                joint_refinement_centers.add(float(best[2].md_m))
+                joint_refinement_mds: set[float] = set()
+                for center_md in joint_refinement_centers:
+                    left = max(min_md, center_md - control_step)
+                    right = min(max_md, center_md + control_step)
+                    local_count = int(math.ceil((right - left) / local_step)) + 1
+                    joint_refinement_mds.update(
+                        float(md) for md in np.linspace(left, right, local_count)
+                    )
+                for md in sorted(
+                    joint_refinement_mds,
+                    key=lambda candidate_md: (
+                        proximity_lower_bound(candidate_md),
+                        -candidate_md,
+                    ),
+                ):
+                    evaluate_joint_tail(md)
+        else:
+            seed_mds: list[float] = []
+            if best is not None:
+                seed_mds.append(float(best[2].md_m))
+            seed_mds.extend(
+                item[0]
+                for item in sorted(
+                    raw_scores_by_md.values(),
+                    key=lambda item: (item[1], item[2], -item[0]),
+                )[:8]
+            )
+            seed_mds.extend(
+                item[0]
+                for item in sorted(
+                    window_candidates_by_md.values(),
+                    key=lambda item: (item[2], -item[0]),
+                )[:4]
+            )
+            try:
+                joint_candidate = _optimized_pilot_window_tail_geometry(
+                    main_stations=stations,
+                    md_values=md_values,
+                    pilot_name=pilot_name,
+                    parent_name=parent_name,
+                    min_window_md_m=min_md,
+                    max_window_md_m=max_md,
+                    study_points=pilot_target_points[1:],
+                    config=pilot_config,
+                    seed_window_mds=tuple(seed_mds),
+                )
+                joint_window = joint_candidate.window
+                joint_tail = joint_candidate.tail
+                joint_md = float(joint_window.md_m)
+                joint_pilot = _pilot_from_main_bore_window(
+                    main_stations=stations,
+                    window=joint_window,
+                    study_points=pilot_target_points[1:],
+                    pilot_config=pilot_config,
+                    main_config=main_config,
+                    dls_values_deg_per_30m=joint_tail.dls_deg_per_30m,
+                )
+                joint_score = main_md + float(joint_pilot.md_total_m) - joint_md
+                if optimization_context is not None:
+                    joint_score += _trajectory_anticollision_penalty(
+                        stations=joint_pilot.stations,
+                        optimization_context=optimization_context,
+                    )
+                joint_key = (
+                    joint_score,
+                    float(joint_candidate.lower_bound_m),
+                    -joint_md,
+                )
+                if best is None or joint_key < best[0]:
+                    best = (joint_key, joint_pilot, joint_window)
+            except (ValueError, PlanningError, ArithmeticError) as exc:
+                last_problem = str(exc)
+    if best is None:
+        suffix = f" Последняя причина: {last_problem}" if last_problem else ""
+        if window_override is not None:
+            coordinate = "MD" if window_override.kind == "md" else "Z"
+            raise ValueError(
+                f"Ручное окно пилота по {coordinate}="
+                f"{float(window_override.value_m):.2f} м не дало буримую "
+                "траекторию ко всем PL-точкам." + suffix
+            )
+        raise ValueError(
+            "Не удалось построить пилот от классической ГС: ни одно окно до t1 "
+            "не позволяет достичь всех PL-точек с заданными ограничениями." + suffix
+        )
+    _key, pilot, window = best
+    pilot_tail_md_m = float(pilot.md_total_m) - float(window.md_m)
+    total_md = main_md + pilot_tail_md_m
+    window_to_first_pl_m = float(np.linalg.norm(_point_array(window.point) - pl1_xyz))
+    window_search_resolution_m = (
+        0.0
+        if window_override is not None
+        else max(
+            min(
+                float(main_config.md_step_control_m),
+                float(pilot_config.md_step_control_m),
+            )
+            / 10.0,
+            0.01,
+        )
+    )
+    return PilotFromMainBorePlan(
+        pilot=pilot,
+        window=window,
+        main_bore=main_bore,
+        total_drilled_md_m=total_md,
+        pilot_tail_md_m=pilot_tail_md_m,
+        window_to_first_pl_m=window_to_first_pl_m,
+        window_search_resolution_m=window_search_resolution_m,
+    )
+
+
+def _pilot_window_local_minimum_mds(
+    candidates: tuple[tuple[float, float, float], ...],
+    *,
+    control_step_m: float,
+) -> set[float]:
+    """Return all sampled local minima across disconnected feasible intervals."""
+
+    ordered = sorted(candidates, key=lambda item: item[0])
+    if not ordered:
+        return set()
+    gap_limit = float(control_step_m) * 1.5 + 1e-9
+    result: set[float] = set()
+    for index, (md, score, _proximity) in enumerate(ordered):
+        previous_score = float("inf")
+        if index > 0 and md - ordered[index - 1][0] <= gap_limit:
+            previous_score = float(ordered[index - 1][1])
+        next_score = float("inf")
+        if index + 1 < len(ordered) and ordered[index + 1][0] - md <= gap_limit:
+            next_score = float(ordered[index + 1][1])
+        if score <= previous_score + 1e-6 and score <= next_score + 1e-6:
+            result.add(float(md))
+    return result
+
+
+def _exact_pilot_tail_geometry(
+    *,
+    start: Point3D,
+    start_inc_deg: float,
+    start_azi_deg: float,
+    study_points: tuple[Point3D, ...],
+    config: TrajectoryConfig,
+    dls_values_deg_per_30m: tuple[float, ...] | None = None,
+) -> _PilotTailGeometry:
+    """Return exact BUILD+HOLD MD without materializing survey stations.
+
+    With no explicit DLS sequence, every leg uses the maximum allowed
+    curvature, which is the shortest connection for that individual leg.
+    The joint optimizer supplies lower curvatures for earlier legs when a
+    different tangent reduces the sum across subsequent PL points.
+    """
+
+    max_dls = float(config.dls_build_max_deg_per_30m)
+    dls_values = (
+        tuple(max_dls for _ in study_points)
+        if dls_values_deg_per_30m is None
+        else tuple(float(value) for value in dls_values_deg_per_30m)
+    )
+    if len(dls_values) != len(study_points):
+        raise ValueError("Число значений ПИ не совпадает с числом участков пилота.")
+    configured_min_dls = float(config.dls_build_min_deg_per_30m)
+    if any(
+        not math.isfinite(value)
+        or value <= SMALL
+        or value < configured_min_dls - SMALL
+        or value > max_dls + SMALL
+        for value in dls_values
+    ):
+        raise ValueError("ПИ участка пилота находится вне заданных ограничений.")
+
+    current = start
+    current_inc_deg = float(start_inc_deg)
+    current_azi_deg = float(start_azi_deg)
+    extra_md_m = 0.0
+    first_leg_md_m = 0.0
+    for index, (target, leg_dls) in enumerate(
+        zip(study_points, dls_values, strict=True),
+        start=1,
+    ):
+        target_vector = _point_array(target) - _point_array(current)
+        if float(np.linalg.norm(target_vector)) <= SMALL:
+            raise ValueError("Пилот содержит совпадающие соседние точки.")
+        geometry = _exact_build_hold_geometry(
+            target_vector=target_vector,
+            start_inc_deg=current_inc_deg,
+            start_azi_deg=current_azi_deg,
+            dls_deg_per_30m=leg_dls,
+            max_inc_deg=float(config.max_inc_deg),
+        )
+        if geometry is None:
+            raise ValueError(
+                "Не существует буримого участка BUILD+HOLD до точки "
+                f"p{index} при ПИ <= "
+                f"{dls_to_pi(leg_dls):.2f} "
+                "deg/10m и заданном max INC."
+            )
+        next_inc_deg, next_azi_deg, hold_length_m = geometry
+        build_length_m = _build_length_m(
+            inc_from_deg=current_inc_deg,
+            azi_from_deg=current_azi_deg,
+            inc_to_deg=float(next_inc_deg),
+            azi_to_deg=float(next_azi_deg),
+            dls_deg_per_30m=leg_dls,
+        )
+        leg_md_m = float(build_length_m + hold_length_m)
+        if not math.isfinite(leg_md_m) or leg_md_m <= SMALL:
+            raise ValueError(f"Участок пилота до точки p{index} имеет нулевой MD.")
+        extra_md_m += leg_md_m
+        if index == 1:
+            first_leg_md_m = leg_md_m
+        current = target
+        current_inc_deg = float(next_inc_deg)
+        current_azi_deg = float(next_azi_deg)
+    return _PilotTailGeometry(
+        extra_md_m=float(extra_md_m),
+        first_leg_md_m=float(first_leg_md_m),
+        dls_deg_per_30m=dls_values,
+    )
+
+
+def _optimized_pilot_tail_geometry(
+    *,
+    start: Point3D,
+    start_inc_deg: float,
+    start_azi_deg: float,
+    study_points: tuple[Point3D, ...],
+    config: TrajectoryConfig,
+) -> _PilotTailGeometry:
+    """Minimize complete pilot-tail MD across all PL leg curvatures.
+
+    The last leg always uses the maximum allowed DLS because it has no
+    downstream tangent to improve.  Earlier legs are optimized jointly: a
+    locally longer connection to one PL point may shorten the following leg
+    enough to reduce total drilled footage.
+    """
+
+    if not study_points:
+        raise ValueError("Пилоту нужна минимум одна PL-точка после окна.")
+    upper_dls = float(config.dls_build_max_deg_per_30m)
+    if upper_dls <= SMALL:
+        raise ValueError("Для пилота dls_build_max_deg_per_30m должен быть > 0.")
+    if len(study_points) == 1:
+        geometry = _exact_pilot_tail_geometry(
+            start=start,
+            start_inc_deg=start_inc_deg,
+            start_azi_deg=start_azi_deg,
+            study_points=study_points,
+            config=config,
+        )
+        if geometry.first_leg_md_m < float(config.min_structural_segment_m) - SMALL:
+            raise ValueError("Первый участок пилота от окна слишком короткий.")
+        return geometry
+
+    lower_dls = max(
+        float(config.dls_build_min_deg_per_30m),
+        _PILOT_NUMERICAL_DLS_FLOOR_DEG_PER_30M,
+    )
+    lower_dls = min(lower_dls, upper_dls)
+    control_count = len(study_points) - 1
+    if upper_dls - lower_dls <= SMALL:
+        geometry = _exact_pilot_tail_geometry(
+            start=start,
+            start_inc_deg=start_inc_deg,
+            start_azi_deg=start_azi_deg,
+            study_points=study_points,
+            config=config,
+        )
+        if geometry.first_leg_md_m < float(config.min_structural_segment_m) - SMALL:
+            raise ValueError("Первый участок пилота от окна слишком короткий.")
+        return geometry
+
+    cache: dict[tuple[float, ...], _PilotTailGeometry | None] = {}
+
+    def geometry_for(unit_values: np.ndarray) -> _PilotTailGeometry | None:
+        units = np.clip(np.asarray(unit_values, dtype=float), 0.0, 1.0)
+        cache_key = tuple(round(float(value), 9) for value in units)
+        if cache_key in cache:
+            return cache[cache_key]
+        optimized_dls = tuple(
+            lower_dls + float(value) * (upper_dls - lower_dls) for value in units
+        )
+        dls_values = (*optimized_dls, upper_dls)
+        try:
+            geometry = _exact_pilot_tail_geometry(
+                start=start,
+                start_inc_deg=start_inc_deg,
+                start_azi_deg=start_azi_deg,
+                study_points=study_points,
+                config=config,
+                dls_values_deg_per_30m=dls_values,
+            )
+            if geometry.first_leg_md_m < float(config.min_structural_segment_m) - SMALL:
+                geometry = None
+        except (ValueError, ArithmeticError):
+            geometry = None
+        cache[cache_key] = geometry
+        return geometry
+
+    def objective(unit_values: np.ndarray) -> float:
+        geometry = geometry_for(unit_values)
+        return float(geometry.extra_md_m) if geometry is not None else 1.0e12
+
+    if control_count == 1:
+        # The outgoing tangent can make the feasible DLS domain narrow and
+        # disconnected. A sparse grid may jump over a valid interval entirely.
+        sampled_units = np.linspace(0.0, 1.0, 25)
+        sampled = [
+            (float(unit), geometry_for(np.asarray([unit], dtype=float)))
+            for unit in sampled_units
+        ]
+        if not any(geometry is not None for _unit, geometry in sampled):
+            sampled_units = np.linspace(0.0, 1.0, 65)
+            sampled = [
+                (float(unit), geometry_for(np.asarray([unit], dtype=float)))
+                for unit in sampled_units
+            ]
+        for index, (unit, geometry) in enumerate(sampled):
+            if geometry is None:
+                continue
+            previous_score = (
+                float(sampled[index - 1][1].extra_md_m)
+                if index > 0 and sampled[index - 1][1] is not None
+                else float("inf")
+            )
+            next_score = (
+                float(sampled[index + 1][1].extra_md_m)
+                if index + 1 < len(sampled) and sampled[index + 1][1] is not None
+                else float("inf")
+            )
+            if (
+                float(geometry.extra_md_m) > previous_score + 1e-7
+                or float(geometry.extra_md_m) > next_score + 1e-7
+            ):
+                continue
+            left = float(sampled_units[max(0, index - 1)])
+            right = float(sampled_units[min(len(sampled_units) - 1, index + 1)])
+            if right - left <= 1e-9:
+                continue
+            result = minimize_scalar(
+                lambda value: objective(np.asarray([value], dtype=float)),
+                bounds=(left, right),
+                method="bounded",
+                options={"xatol": 1e-6, "maxiter": 80},
+            )
+            geometry_for(np.asarray([float(result.x)], dtype=float))
+    else:
+        population_size = max(16, min(56, 6 * control_count))
+        rng = np.random.default_rng(20_260_918)
+        population = rng.random((population_size, control_count))
+        seed_rows = (
+            np.ones(control_count, dtype=float),
+            np.full(control_count, 0.85, dtype=float),
+            np.full(control_count, 0.70, dtype=float),
+            np.full(control_count, 0.50, dtype=float),
+            np.full(control_count, 0.25, dtype=float),
+        )
+        for index, seed_row in enumerate(seed_rows[:population_size]):
+            population[index] = seed_row
+        result = differential_evolution(
+            objective,
+            bounds=[(0.0, 1.0)] * control_count,
+            init=population,
+            maxiter=max(18, min(42, 50 - 2 * control_count)),
+            tol=1e-7,
+            atol=1e-5,
+            polish=False,
+            seed=20_260_918,
+            workers=1,
+            updating="immediate",
+        )
+        geometry_for(np.asarray(result.x, dtype=float))
+        if (
+            control_count <= 8
+            and math.isfinite(float(result.fun))
+            and float(result.fun) < 1.0e11
+        ):
+            polished = minimize(
+                objective,
+                np.asarray(result.x, dtype=float),
+                method="Powell",
+                bounds=[(0.0, 1.0)] * control_count,
+                options={"xtol": 1e-6, "ftol": 1e-9, "maxiter": 160},
+            )
+            geometry_for(np.asarray(polished.x, dtype=float))
+
+    feasible = [geometry for geometry in cache.values() if geometry is not None]
+    if not feasible:
+        raise ValueError(
+            "Не удалось совместно оптимизировать участки пилота между PL-точками."
+        )
+    return min(
+        feasible,
+        key=lambda geometry: (
+            float(geometry.extra_md_m),
+            tuple(-value for value in geometry.dls_deg_per_30m),
+        ),
+    )
+
+
+def _optimized_pilot_window_tail_geometry(
+    *,
+    main_stations: pd.DataFrame,
+    md_values: np.ndarray,
+    pilot_name: str,
+    parent_name: str,
+    min_window_md_m: float,
+    max_window_md_m: float,
+    study_points: tuple[Point3D, ...],
+    config: TrajectoryConfig,
+    seed_window_mds: tuple[float, ...],
+) -> _PilotWindowTailGeometry:
+    """Jointly optimize continuous window MD and all upstream PL curvatures."""
+
+    if len(study_points) < 2:
+        raise ValueError("Совместная оптимизация требует минимум две PL-точки.")
+    min_md = float(min_window_md_m)
+    max_md = float(max_window_md_m)
+    if max_md <= min_md + SMALL:
+        raise ValueError("Диапазон поиска окна пилота пуст.")
+    upper_dls = float(config.dls_build_max_deg_per_30m)
+    if upper_dls <= SMALL:
+        raise ValueError("Для пилота dls_build_max_deg_per_30m должен быть > 0.")
+    lower_dls = min(
+        max(
+            float(config.dls_build_min_deg_per_30m),
+            _PILOT_NUMERICAL_DLS_FLOOR_DEG_PER_30M,
+        ),
+        upper_dls,
+    )
+    control_count = len(study_points) - 1
+    dimension = control_count + 1
+    pl1_xyz = _point_array(study_points[0])
+    fixed_tail_lower_bound = sum(
+        float(np.linalg.norm(_point_array(right) - _point_array(left)))
+        for left, right in zip(study_points[:-1], study_points[1:])
+    )
+    cache: dict[tuple[float, ...], _PilotWindowTailGeometry | None] = {}
+
+    def candidate_for(unit_values: np.ndarray) -> _PilotWindowTailGeometry | None:
+        units = np.clip(np.asarray(unit_values, dtype=float), 0.0, 1.0)
+        cache_key = tuple(round(float(value), 9) for value in units)
+        if cache_key in cache:
+            return cache[cache_key]
+        window_md = min_md + float(units[0]) * (max_md - min_md)
+        try:
+            row = _interpolate_main_bore_window_by_md(
+                main_stations,
+                window_md,
+                md_values,
+            )
+            window = PilotWindow.from_station(
+                pilot_name=pilot_name,
+                parent_name=parent_name,
+                row=row,
+            )
+            if float(window.point.z) >= float(study_points[0].z) - SMALL:
+                raise ValueError("Окно находится не выше первой PL-точки.")
+            dls_values = tuple(
+                lower_dls + float(value) * (upper_dls - lower_dls)
+                for value in units[1:]
+            ) + (upper_dls,)
+            tail = _exact_pilot_tail_geometry(
+                start=window.point,
+                start_inc_deg=float(window.inc_deg),
+                start_azi_deg=float(window.azi_deg),
+                study_points=study_points,
+                config=config,
+                dls_values_deg_per_30m=dls_values,
+            )
+            if tail.first_leg_md_m < float(config.min_structural_segment_m) - SMALL:
+                raise ValueError("Первый участок пилота от окна слишком короткий.")
+            lower_bound = (
+                float(np.linalg.norm(_point_array(window.point) - pl1_xyz))
+                + fixed_tail_lower_bound
+            )
+            candidate = _PilotWindowTailGeometry(
+                window=window,
+                tail=tail,
+                lower_bound_m=lower_bound,
+            )
+        except (ValueError, PlanningError, ArithmeticError):
+            candidate = None
+        cache[cache_key] = candidate
+        return candidate
+
+    def objective(unit_values: np.ndarray) -> float:
+        candidate = candidate_for(unit_values)
+        return float(candidate.tail.extra_md_m) if candidate is not None else 1.0e12
+
+    population_size = max(20, min(64, 6 * dimension))
+    rng = np.random.default_rng(20_260_918)
+    population = rng.random((population_size, dimension))
+    normalized_seed_mds = [
+        float(np.clip((float(md) - min_md) / (max_md - min_md), 0.0, 1.0))
+        for md in seed_window_mds
+        if math.isfinite(float(md))
+    ]
+    seed_rows: list[np.ndarray] = []
+    for window_unit in normalized_seed_mds[:8]:
+        seed_rows.append(
+            np.asarray([window_unit, *([1.0] * control_count)], dtype=float)
+        )
+    primary_window_unit = normalized_seed_mds[0] if normalized_seed_mds else 0.5
+    for dls_unit in (0.85, 0.70, 0.50, 0.25):
+        seed_rows.append(
+            np.asarray(
+                [primary_window_unit, *([dls_unit] * control_count)],
+                dtype=float,
+            )
+        )
+    for index, seed_row in enumerate(seed_rows[:population_size]):
+        population[index] = seed_row
+
+    result = differential_evolution(
+        objective,
+        bounds=[(0.0, 1.0)] * dimension,
+        init=population,
+        maxiter=max(18, min(42, 50 - 2 * dimension)),
+        tol=1e-7,
+        atol=1e-5,
+        polish=False,
+        seed=20_260_918,
+        workers=1,
+        updating="immediate",
+    )
+    candidate_for(np.asarray(result.x, dtype=float))
+    if (
+        dimension <= 8
+        and math.isfinite(float(result.fun))
+        and float(result.fun) < 1.0e11
+    ):
+        polished = minimize(
+            objective,
+            np.asarray(result.x, dtype=float),
+            method="Powell",
+            bounds=[(0.0, 1.0)] * dimension,
+            options={"xtol": 1e-6, "ftol": 1e-9, "maxiter": 120},
+        )
+        candidate_for(np.asarray(polished.x, dtype=float))
+
+    feasible = [candidate for candidate in cache.values() if candidate is not None]
+    if not feasible:
+        raise ValueError(
+            "Не удалось совместно оптимизировать окно и участки пилота "
+            "между PL-точками."
+        )
+    return min(
+        feasible,
+        key=lambda candidate: (
+            float(candidate.tail.extra_md_m),
+            float(candidate.lower_bound_m),
+            -float(candidate.window.md_m),
+        ),
+    )
+
+
+def _interpolate_main_bore_window_by_md(
+    stations: pd.DataFrame,
+    target_md_m: float,
+    md_values: np.ndarray,
+) -> pd.Series:
+    """Interpolate the window on the minimum-curvature arc, not its chord."""
+
+    upper = int(np.searchsorted(md_values, target_md_m, side="left"))
+    if upper < len(md_values) and abs(float(md_values[upper]) - target_md_m) <= SMALL:
+        return stations.iloc[upper].copy()
+    if upper == 0 or upper == len(md_values):
+        raise ValueError("MD окна вне диапазона классической ГС.")
+    start = stations.iloc[upper - 1]
+    end = stations.iloc[upper]
+    fraction = (target_md_m - float(md_values[upper - 1])) / (
+        float(md_values[upper]) - float(md_values[upper - 1])
+    )
+    direction = _interpolate_unit_direction(
+        _unit_vector_xyz(
+            inc_deg=float(start["INC_deg"]), azi_deg=float(start["AZI_deg"])
+        ),
+        _unit_vector_xyz(inc_deg=float(end["INC_deg"]), azi_deg=float(end["AZI_deg"])),
+        fraction,
+    )
+    inc_deg = float(math.degrees(math.acos(float(np.clip(direction[2], -1.0, 1.0)))))
+    azi_deg = _normalize_azimuth_deg(
+        math.degrees(math.atan2(direction[0], direction[1]))
+    )
+    north, east, z = minimum_curvature_increment(
+        float(start["MD_m"]),
+        float(start["INC_deg"]),
+        float(start["AZI_deg"]),
+        target_md_m,
+        inc_deg,
+        azi_deg,
+    )
+    return pd.Series(
+        {
+            "MD_m": target_md_m,
+            "INC_deg": inc_deg,
+            "AZI_deg": azi_deg,
+            "X_m": float(start["X_m"]) + east,
+            "Y_m": float(start["Y_m"]) + north,
+            "Z_m": float(start["Z_m"]) + z,
+            "segment": end.get("segment", "PILOT_WINDOW"),
+        }
+    )
+
+
+def _interpolate_main_bore_window_by_z(
+    stations: pd.DataFrame,
+    target_z_m: float,
+    md_values: np.ndarray,
+    *,
+    min_md_m: float | None = None,
+    max_md_m: float | None = None,
+) -> pd.Series:
+    """Find the first MD where the minimum-curvature arc reaches ``target_z_m``."""
+
+    target_z = float(target_z_m)
+    if not math.isfinite(target_z):
+        raise ValueError("Z окна должен быть конечным числом.")
+    lower_md = float(md_values[0]) if min_md_m is None else float(min_md_m)
+    upper_md = float(md_values[-1]) if max_md_m is None else float(max_md_m)
+    if (
+        not math.isfinite(lower_md)
+        or not math.isfinite(upper_md)
+        or lower_md > upper_md + SMALL
+    ):
+        raise ValueError("Диапазон MD для поиска окна по Z некорректен.")
+    lower_md = max(lower_md, float(md_values[0]))
+    upper_md = min(upper_md, float(md_values[-1]))
+    if lower_md > upper_md + SMALL:
+        raise ValueError(
+            "Диапазон MD для поиска окна по Z не пересекает траекторию ГС."
+        )
+
+    candidates: list[float] = []
+    for index in range(len(md_values) - 1):
+        left_md = max(float(md_values[index]), lower_md)
+        right_md = min(float(md_values[index + 1]), upper_md)
+        if right_md < left_md + SMALL:
+            continue
+
+        def residual(md: float) -> float:
+            return (
+                float(
+                    _interpolate_main_bore_window_by_md(stations, md, md_values)["Z_m"]
+                )
+                - target_z
+            )
+
+        # Z is not necessarily monotonic inside a minimum-curvature interval:
+        # an interval crossing INC=90 deg has an interior depth extremum.  Split
+        # at that tangent-horizontal point before root finding so both crossings
+        # remain discoverable even when the endpoint Z values are equal.
+        partitions = [left_md, right_md]
+
+        def vertical_tangent(md: float) -> float:
+            row = _interpolate_main_bore_window_by_md(stations, md, md_values)
+            return float(math.cos(math.radians(float(row["INC_deg"]))))
+
+        left_tangent = vertical_tangent(left_md)
+        right_tangent = vertical_tangent(right_md)
+        if left_tangent * right_tangent < 0.0:
+            try:
+                partitions.append(
+                    float(
+                        brentq(
+                            vertical_tangent,
+                            left_md,
+                            right_md,
+                            xtol=1e-7,
+                            rtol=1e-12,
+                            maxiter=100,
+                        )
+                    )
+                )
+            except ValueError:
+                pass
+        partitions = sorted(set(partitions))
+        for interval_left, interval_right in zip(partitions, partitions[1:]):
+            left_residual = residual(interval_left)
+            right_residual = residual(interval_right)
+            if abs(left_residual) <= SMALL:
+                candidates.append(interval_left)
+            if abs(right_residual) <= SMALL:
+                candidates.append(interval_right)
+            if left_residual * right_residual >= 0.0:
+                continue
+            try:
+                candidates.append(
+                    float(
+                        brentq(
+                            residual,
+                            interval_left,
+                            interval_right,
+                            xtol=1e-7,
+                            rtol=1e-12,
+                            maxiter=100,
+                        )
+                    )
+                )
+            except ValueError:
+                continue
+    if not candidates:
+        raise ValueError(
+            f"Z окна={target_z:.2f} м не пересекает допустимый участок классической ГС."
+        )
+    return _interpolate_main_bore_window_by_md(stations, min(candidates), md_values)
+
+
+def _interpolate_unit_direction(
+    start: np.ndarray,
+    end: np.ndarray,
+    fraction: float,
+) -> np.ndarray:
+    """Spherical interpolation with a deterministic antipodal fallback."""
+
+    start = np.asarray(start, dtype=float)
+    end = np.asarray(end, dtype=float)
+    fraction = float(max(0.0, min(1.0, fraction)))
+    dot = float(np.clip(np.dot(start, end), -1.0, 1.0))
+    angle = float(np.arccos(dot))
+    if angle <= 1e-12:
+        return start.copy()
+    cross = np.cross(start, end)
+    cross_norm = float(np.linalg.norm(cross))
+    if cross_norm <= 1e-10:
+        basis = np.eye(3, dtype=float)[int(np.argmin(np.abs(start)))]
+        rotation_axis = np.cross(start, basis)
+        rotation_axis /= float(np.linalg.norm(rotation_axis))
+        in_plane = np.cross(rotation_axis, start)
+        return np.cos(fraction * angle) * start + np.sin(fraction * angle) * in_plane
+    return (
+        math.sin((1.0 - fraction) * angle) * start + math.sin(fraction * angle) * end
+    ) / math.sin(angle)
+
+
+def _pilot_from_main_bore_window(
+    *,
+    main_stations: pd.DataFrame,
+    window: PilotWindow,
+    study_points: tuple[Point3D, ...],
+    pilot_config: TrajectoryConfig,
+    main_config: TrajectoryConfig,
+    dls_values_deg_per_30m: tuple[float, ...] | None = None,
+) -> PilotBuildResult:
+    md = float(window.md_m)
+    prefix = main_stations.loc[
+        main_stations["MD_m"].to_numpy(dtype=float) <= md + SMALL
+    ].copy()
+    if float(prefix["MD_m"].iloc[-1]) < md - SMALL:
+        main_md_values = main_stations["MD_m"].to_numpy(dtype=float)
+        upper_index = min(
+            int(np.searchsorted(main_md_values, md, side="left")),
+            len(main_stations) - 1,
+        )
+        window_segment = str(
+            main_stations.iloc[upper_index].get("segment", "PILOT_WINDOW")
+        )
+        prefix = pd.concat(
+            [
+                prefix,
+                pd.DataFrame(
+                    [
+                        {
+                            "MD_m": md,
+                            "INC_deg": float(window.inc_deg),
+                            "AZI_deg": float(window.azi_deg),
+                            "X_m": float(window.point.x),
+                            "Y_m": float(window.point.y),
+                            "Z_m": float(window.point.z),
+                            "segment": window_segment,
+                        }
+                    ]
+                ),
+            ],
+            ignore_index=True,
+        )
+    parts = [prefix]
+    branch_start_index = len(prefix) - 1
+    current = window.point
+    current_inc = float(window.inc_deg)
+    current_azi = float(window.azi_deg)
+    current_md = md
+    first_target_md = 0.0
+    leg_dls_values = (
+        tuple(float(pilot_config.dls_build_max_deg_per_30m) for _ in study_points)
+        if dls_values_deg_per_30m is None
+        else tuple(float(value) for value in dls_values_deg_per_30m)
+    )
+    if len(leg_dls_values) != len(study_points):
+        raise ValueError("Число значений ПИ не совпадает с числом участков пилота.")
+    for index, (point, leg_dls) in enumerate(
+        zip(study_points, leg_dls_values, strict=True),
+        start=1,
+    ):
+        leg = _pilot_build_hold_leg_to_target(
+            start=current,
+            target=point,
+            start_md_m=current_md,
+            start_inc_deg=current_inc,
+            start_azi_deg=current_azi,
+            segment_index=index,
+            config=pilot_config,
+            use_exact_geometry=True,
+            dls_deg_per_30m=leg_dls,
+        )
+        parts.append(leg.iloc[1:].copy())
+        current = point
+        current_inc = float(leg["INC_deg"].iloc[-1])
+        current_azi = float(leg["AZI_deg"].iloc[-1])
+        current_md = float(leg["MD_m"].iloc[-1])
+        if index == 1:
+            first_target_md = current_md
+    stations = add_dls(pd.concat(parts, ignore_index=True))
+    branch_stations = stations.iloc[branch_start_index:].copy()
+    prefix_for_validation = stations.iloc[: branch_start_index + 1].copy()
+    if np.any(np.diff(stations["MD_m"].to_numpy(dtype=float)) <= SMALL):
+        raise ValueError("MD пилота должен строго возрастать от устья до забоя.")
+    branch_dls_excess = _max_dls_limit_excess(branch_stations.iloc[1:], pilot_config)
+    if branch_dls_excess > 1e-6:
+        raise ValueError("ПИ пилота превышает заданный лимит после окна.")
+    if _finite_max(branch_stations["INC_deg"]) > float(pilot_config.max_inc_deg) + 1e-6:
+        raise ValueError("INC пилота превышает заданный лимит.")
+    rebuilt = compute_positions_min_curv(
+        branch_stations[["MD_m", "INC_deg", "AZI_deg"]].assign(
+            MD_m=lambda frame: frame["MD_m"].to_numpy(dtype=float) - float(window.md_m)
+        ),
+        start=Point3D(
+            x=float(branch_stations["X_m"].iloc[0]),
+            y=float(branch_stations["Y_m"].iloc[0]),
+            z=float(branch_stations["Z_m"].iloc[0]),
+        ),
+    )
+    mismatch = np.linalg.norm(
+        rebuilt[["X_m", "Y_m", "Z_m"]].to_numpy(dtype=float)
+        - branch_stations[["X_m", "Y_m", "Z_m"]].to_numpy(dtype=float),
+        axis=1,
+    )
+    if float(np.max(mismatch)) > min(0.5, float(pilot_config.vertical_tolerance_m)):
+        raise ValueError("Пилот не согласован с пересчётом minimum-curvature.")
+    total_md = float(stations["MD_m"].iloc[-1])
+    overall_max_dls = _finite_max(stations["DLS_deg_per_30m"])
+    prefix_dls_excess = _max_dls_limit_excess(prefix_for_validation, main_config)
+    if prefix_dls_excess > 1e-6:
+        raise ValueError("Общий участок ГС до окна превышает заданный для ГС лимит ПИ.")
+    overall_dls_excess = max(prefix_dls_excess, branch_dls_excess)
+    if "segment" in prefix:
+        vertical_md = pd.to_numeric(
+            prefix.loc[
+                prefix["segment"].fillna("").astype(str).str.upper() == "VERTICAL",
+                "MD_m",
+            ],
+            errors="coerce",
+        )
+        kop_md = float(vertical_md.max()) if not vertical_md.empty else 0.0
+    else:
+        kop_md = 0.0
+    summary: SummaryDict = {
+        "trajectory_type": "PILOT",
+        "trajectory_target_direction": "Пилотный ствол",
+        "well_complexity": "Пилот от ГС",
+        "horizontal_length_m": 0.0,
+        "entry_inc_deg": 0.0,
+        "hold_inc_deg": 0.0,
+        "max_dls_total_deg_per_30m": overall_max_dls,
+        "md_total_m": total_md,
+        "max_total_md_postcheck_m": float(pilot_config.max_total_md_postcheck_m),
+        "md_postcheck_excess_m": max(
+            0.0, total_md - float(pilot_config.max_total_md_postcheck_m)
+        ),
+        "dls_postcheck_excess_deg_per_30m": max(
+            0.0,
+            overall_dls_excess,
+        ),
+        "solver_turn_restarts_used": 0.0,
+        "solver_turn_max_restarts": float(pilot_config.turn_solver_max_restarts),
+        "pilot_target_count": float(len(study_points)),
+        "kop_md_m": kop_md if math.isfinite(kop_md) else 0.0,
+        "pilot_planning_mode": PILOT_PLANNING_PILOT_FROM_MAIN_BORE,
+        "pilot_window_md_m": md,
+        "pilot_window_distance_to_first_pl_m": float(
+            np.linalg.norm(_point_array(window.point) - _point_array(study_points[0]))
+        ),
+        "pilot_tail_md_from_window_m": total_md - md,
+        "pilot_leg_dls_deg_per_30m": "|".join(
+            f"{value:.8g}" for value in leg_dls_values
+        ),
+        "pilot_tail_optimization": (
+            "joint_min_total_md"
+            if any(
+                value < float(pilot_config.dls_build_max_deg_per_30m) - 1e-7
+                for value in leg_dls_values[:-1]
+            )
+            else "max_dls_shortest_legs"
+        ),
+    }
+    return PilotBuildResult(
+        stations=stations,
+        surface=Point3D(
+            x=float(stations["X_m"].iloc[0]),
+            y=float(stations["Y_m"].iloc[0]),
+            z=float(stations["Z_m"].iloc[0]),
+        ),
+        first_target=study_points[0],
+        final_target=study_points[-1],
+        md_first_target_m=first_target_md,
+        md_total_m=total_md,
+        azimuth_deg=_first_valid_azimuth_deg(stations),
+        summary=summary,
+    )
 
 
 def is_pilot_name(name: object) -> bool:
@@ -349,7 +1661,10 @@ def sync_pilot_surfaces_to_parents(
             synced.append(record)
             continue
         parent_key = pilot_parent_key_for_record(record)
-        if scoped_parent_keys is not None and parent_key.casefold() not in scoped_parent_keys:
+        if (
+            scoped_parent_keys is not None
+            and parent_key.casefold() not in scoped_parent_keys
+        ):
             synced.append(record)
             continue
         parent = parent_by_key.get(parent_key)
@@ -1894,6 +3209,8 @@ def _pilot_build_hold_leg_to_target(
     start_azi_deg: float,
     segment_index: int,
     config: TrajectoryConfig,
+    use_exact_geometry: bool = False,
+    dls_deg_per_30m: float | None = None,
 ) -> pd.DataFrame:
     target_vector = _point_array(target) - _point_array(start)
     target_distance = float(np.linalg.norm(target_vector))
@@ -1901,68 +3218,91 @@ def _pilot_build_hold_leg_to_target(
         raise ValueError("Пилот содержит совпадающие соседние точки.")
 
     target_inc_deg, target_azi_deg = _angles_from_delta(target_vector)
-    dls_limit = float(config.dls_build_max_deg_per_30m)
-    if dls_limit <= SMALL:
-        raise ValueError("Для пилота dls_build_max_deg_per_30m должен быть > 0.")
-
-    def residual(values: np.ndarray) -> np.ndarray:
-        inc_to_deg = float(values[0])
-        azi_to_deg = float(values[1]) % 360.0
-        hold_length_m = float(values[2])
-        build_length_m = _build_length_m(
-            inc_from_deg=start_inc_deg,
-            azi_from_deg=start_azi_deg,
-            inc_to_deg=inc_to_deg,
-            azi_to_deg=azi_to_deg,
-            dls_deg_per_30m=dls_limit,
-        )
-        build_delta = _minimum_curvature_delta_xyz(
-            length_m=build_length_m,
-            inc_from_deg=start_inc_deg,
-            azi_from_deg=start_azi_deg,
-            inc_to_deg=inc_to_deg,
-            azi_to_deg=azi_to_deg,
-        )
-        hold_delta = hold_length_m * _unit_vector_xyz(
-            inc_deg=inc_to_deg,
-            azi_deg=azi_to_deg,
-        )
-        return build_delta + hold_delta - target_vector
-
-    initial_hold = max(target_distance, 0.0)
-    result = least_squares(
-        residual,
-        x0=np.asarray([target_inc_deg, target_azi_deg, initial_hold], dtype=float),
-        bounds=(
-            np.asarray([0.0, 0.0, 0.0], dtype=float),
-            np.asarray(
-                [
-                    float(config.max_inc_deg),
-                    360.0,
-                    max(target_distance * 2.0, target_distance + 2000.0),
-                ],
-                dtype=float,
-            ),
-        ),
-        xtol=1e-9,
-        ftol=1e-9,
-        gtol=1e-9,
-        max_nfev=300,
+    configured_max_dls = float(config.dls_build_max_deg_per_30m)
+    configured_min_dls = float(config.dls_build_min_deg_per_30m)
+    dls_limit = (
+        configured_max_dls if dls_deg_per_30m is None else float(dls_deg_per_30m)
     )
-    miss_m = float(np.linalg.norm(residual(result.x)))
+    if (
+        not math.isfinite(dls_limit)
+        or dls_limit <= SMALL
+        or dls_limit < configured_min_dls - SMALL
+        or dls_limit > configured_max_dls + SMALL
+    ):
+        raise ValueError("ПИ участка пилота находится вне заданных ограничений.")
     tolerance_m = min(
         float(config.lateral_tolerance_m), float(config.vertical_tolerance_m)
     )
-    if (not bool(result.success)) or miss_m > max(tolerance_m, 0.25):
-        raise ValueError(
-            "Не удалось построить буримый пилотный участок BUILD+HOLD до точки "
-            f"p{int(segment_index)} при ПИ <= {dls_to_pi(dls_limit):.2f} deg/10m. "
-            f"Остаточное отклонение {miss_m:.2f} м."
+    exact_geometry = (
+        _exact_build_hold_geometry(
+            target_vector=target_vector,
+            start_inc_deg=start_inc_deg,
+            start_azi_deg=start_azi_deg,
+            dls_deg_per_30m=dls_limit,
+            max_inc_deg=float(config.max_inc_deg),
         )
+        if use_exact_geometry
+        else None
+    )
+    if exact_geometry is not None:
+        inc_to_deg, azi_to_deg, hold_length_m = exact_geometry
+    else:
 
-    inc_to_deg = float(result.x[0])
-    azi_to_deg = float(result.x[1]) % 360.0
-    hold_length_m = float(max(result.x[2], 0.0))
+        def residual(values: np.ndarray) -> np.ndarray:
+            inc_to_deg = float(values[0])
+            azi_to_deg = float(values[1]) % 360.0
+            hold_length_m = float(values[2])
+            build_length_m = _build_length_m(
+                inc_from_deg=start_inc_deg,
+                azi_from_deg=start_azi_deg,
+                inc_to_deg=inc_to_deg,
+                azi_to_deg=azi_to_deg,
+                dls_deg_per_30m=dls_limit,
+            )
+            build_delta = _minimum_curvature_delta_xyz(
+                length_m=build_length_m,
+                inc_from_deg=start_inc_deg,
+                azi_from_deg=start_azi_deg,
+                inc_to_deg=inc_to_deg,
+                azi_to_deg=azi_to_deg,
+            )
+            hold_delta = hold_length_m * _unit_vector_xyz(
+                inc_deg=inc_to_deg,
+                azi_deg=azi_to_deg,
+            )
+            return build_delta + hold_delta - target_vector
+
+        result = least_squares(
+            residual,
+            x0=np.asarray(
+                [target_inc_deg, target_azi_deg, target_distance], dtype=float
+            ),
+            bounds=(
+                np.asarray([0.0, 0.0, 0.0], dtype=float),
+                np.asarray(
+                    [
+                        float(config.max_inc_deg),
+                        360.0,
+                        max(target_distance * 2.0, target_distance + 2000.0),
+                    ],
+                    dtype=float,
+                ),
+            ),
+            xtol=1e-9,
+            ftol=1e-9,
+            gtol=1e-9,
+            max_nfev=300,
+        )
+        miss_m = float(np.linalg.norm(residual(result.x)))
+        if (not bool(result.success)) or miss_m > max(tolerance_m, 0.25):
+            raise ValueError(
+                "Не удалось построить буримый пилотный участок BUILD+HOLD до точки "
+                f"p{int(segment_index)} при ПИ <= {dls_to_pi(dls_limit):.2f} deg/10m. "
+                f"Остаточное отклонение {miss_m:.2f} м."
+            )
+        inc_to_deg = float(result.x[0])
+        azi_to_deg = float(result.x[1]) % 360.0
+        hold_length_m = float(max(result.x[2], 0.0))
     build = BuildSegment(
         inc_from_deg=float(start_inc_deg),
         inc_to_deg=inc_to_deg,
@@ -1987,6 +3327,91 @@ def _pilot_build_hold_leg_to_target(
     stations.loc[final_index, "Y_m"] = float(target.y)
     stations.loc[final_index, "Z_m"] = float(target.z)
     return stations
+
+
+def _exact_build_hold_geometry(
+    *,
+    target_vector: np.ndarray,
+    start_inc_deg: float,
+    start_azi_deg: float,
+    dls_deg_per_30m: float,
+    max_inc_deg: float,
+) -> tuple[float, float, float] | None:
+    """Solve the minimum-radius BUILD+HOLD connection in its exact plane."""
+
+    dls = float(dls_deg_per_30m)
+    if dls <= SMALL:
+        return None
+    vector = np.asarray(target_vector, dtype=float)
+    start_direction = _unit_vector_xyz(
+        inc_deg=float(start_inc_deg), azi_deg=float(start_azi_deg)
+    )
+    axial_m = float(np.dot(vector, start_direction))
+    perpendicular = vector - axial_m * start_direction
+    lateral_m = float(np.linalg.norm(perpendicular))
+    if lateral_m <= SMALL:
+        if axial_m <= SMALL:
+            return None
+        return float(start_inc_deg), _normalize_azimuth_deg(start_azi_deg), axial_m
+
+    plane_direction = perpendicular / lateral_m
+    radius_m = 30.0 / math.radians(dls)
+    a = axial_m
+    b = radius_m - lateral_m
+    hypotenuse = float(math.hypot(a, b))
+    if hypotenuse < radius_m - 1e-9:
+        return None
+
+    ratio = float(np.clip(radius_m / max(hypotenuse, SMALL), -1.0, 1.0))
+    base = math.asin(ratio)
+    phase = math.atan2(b, a)
+    candidates: list[tuple[float, float, float, float]] = []
+    for root in (base, math.pi - base):
+        for turns in (-1, 0, 1):
+            angle_rad = root - phase + 2.0 * math.pi * turns
+            if angle_rad <= 1e-9 or angle_rad >= math.pi - 1e-9:
+                continue
+            sin_angle = math.sin(angle_rad)
+            cos_angle = math.cos(angle_rad)
+            if abs(cos_angle) >= abs(sin_angle):
+                hold_m = (axial_m - radius_m * sin_angle) / cos_angle
+            else:
+                hold_m = (lateral_m - radius_m * (1.0 - cos_angle)) / sin_angle
+            if hold_m < -1e-7:
+                continue
+            hold_m = max(float(hold_m), 0.0)
+            end_direction = cos_angle * start_direction + sin_angle * plane_direction
+            end_direction /= float(np.linalg.norm(end_direction))
+            z_candidates = [float(start_direction[2]), float(end_direction[2])]
+            stationary = math.atan2(
+                float(plane_direction[2]), float(start_direction[2])
+            )
+            for offset in range(-2, 3):
+                angle = stationary + offset * math.pi
+                if 0.0 < angle < angle_rad:
+                    z_candidates.append(
+                        math.cos(angle) * float(start_direction[2])
+                        + math.sin(angle) * float(plane_direction[2])
+                    )
+            max_arc_inc_deg = float(
+                math.degrees(math.acos(float(np.clip(min(z_candidates), -1.0, 1.0))))
+            )
+            if max_arc_inc_deg > float(max_inc_deg) + 1e-7:
+                continue
+            inc_deg = float(
+                math.degrees(math.acos(float(np.clip(end_direction[2], -1.0, 1.0))))
+            )
+            if inc_deg > float(max_inc_deg) + 1e-7:
+                continue
+            azi_deg = _normalize_azimuth_deg(
+                math.degrees(math.atan2(end_direction[0], end_direction[1]))
+            )
+            total_md = radius_m * angle_rad + hold_m
+            candidates.append((total_md, inc_deg, azi_deg, hold_m))
+    if not candidates:
+        return None
+    _, inc_deg, azi_deg, hold_m = min(candidates)
+    return inc_deg, azi_deg, hold_m
 
 
 def _point_from_welltrack(point: WelltrackPoint) -> Point3D:
@@ -2615,6 +4040,40 @@ def _finite_max(values: pd.Series) -> float:
     if len(array) == 0:
         return 0.0
     return float(np.max(array))
+
+
+def _max_dls_limit_excess(
+    stations: pd.DataFrame,
+    config: TrajectoryConfig,
+) -> float:
+    if "DLS_deg_per_30m" not in stations.columns:
+        return float("inf")
+    dls = pd.to_numeric(stations["DLS_deg_per_30m"], errors="coerce").to_numpy(
+        dtype=float
+    )
+    segments = stations.get(
+        "segment", pd.Series(["PILOT_BUILD"] * len(stations), index=stations.index)
+    )
+    limits = config.dls_limits_deg_per_30m
+    excess = 0.0
+    for index, actual in enumerate(dls):
+        if not math.isfinite(float(actual)):
+            continue
+        segment = str(segments.iloc[index]).strip().upper()
+        if segment == "VERTICAL":
+            limit = float(limits.get("VERTICAL", config.dls_build_max_deg_per_30m))
+        elif segment == "HOLD" or "HOLD" in segment:
+            limit = float(limits.get("HOLD", config.dls_build_max_deg_per_30m))
+        elif "HORIZONTAL" in segment:
+            limit = float(
+                limits.get("HORIZONTAL", config.dls_horizontal_max_deg_per_30m)
+            )
+        elif "BUILD_2" in segment or "BUILD2" in segment:
+            limit = float(limits.get("BUILD2", config.dls_build_max_deg_per_30m))
+        else:
+            limit = float(limits.get("BUILD1", config.dls_build_max_deg_per_30m))
+        excess = max(excess, float(actual) - limit)
+    return float(max(excess, 0.0))
 
 
 def _first_valid_azimuth_deg(stations: pd.DataFrame) -> float:

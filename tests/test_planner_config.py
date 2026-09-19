@@ -13,6 +13,8 @@ from pywp.models import (
     J_PROFILE_POLICY_PROPOSE,
     OPTIMIZATION_MINIMIZE_MD,
     OPTIMIZATION_NONE,
+    PILOT_PLANNING_MAIN_BORE_FROM_PILOT,
+    PILOT_PLANNING_PILOT_FROM_MAIN_BORE,
     Point3D,
     TURN_SOLVER_LEAST_SQUARES,
     TrajectoryConfig,
@@ -21,6 +23,7 @@ from pywp.models import (
 from pywp.planner_config import (
     CFG_DEFAULTS,
     OPTIMIZATION_OPTIONS,
+    PILOT_PLANNING_MODE_OPTIONS,
     TURN_SOLVER_OPTIONS,
     build_segment_dls_limits,
     build_trajectory_config,
@@ -32,6 +35,38 @@ def test_option_dictionaries_cover_supported_modes() -> None:
     assert OPTIMIZATION_NONE in OPTIMIZATION_OPTIONS
     assert OPTIMIZATION_MINIMIZE_MD in OPTIMIZATION_OPTIONS
     assert TURN_SOLVER_LEAST_SQUARES in TURN_SOLVER_OPTIONS
+    assert (
+        PILOT_PLANNING_PILOT_FROM_MAIN_BORE in PILOT_PLANNING_MODE_OPTIONS
+    )
+    assert (
+        PILOT_PLANNING_MAIN_BORE_FROM_PILOT in PILOT_PLANNING_MODE_OPTIONS
+    )
+
+
+def test_pilot_planning_mode_defaults_to_pilot_from_main_bore() -> None:
+    assert TrajectoryConfig().pilot_planning_mode == PILOT_PLANNING_PILOT_FROM_MAIN_BORE
+    assert (
+        build_trajectory_config(
+            md_step_m=10.0,
+            md_step_control_m=2.0,
+            lateral_tolerance_m=30.0,
+            vertical_tolerance_m=2.0,
+            entry_inc_target_deg=86.0,
+            entry_inc_tolerance_deg=2.0,
+            max_inc_deg=95.0,
+            dls_build_max_deg_per_30m=3.0,
+            kop_min_vertical_m=400.0,
+            optimization_mode=OPTIMIZATION_NONE,
+            turn_solver_mode=TURN_SOLVER_LEAST_SQUARES,
+            turn_solver_max_restarts=0,
+        ).pilot_planning_mode
+        == PILOT_PLANNING_PILOT_FROM_MAIN_BORE
+    )
+
+
+def test_trajectory_config_rejects_unknown_pilot_planning_mode() -> None:
+    with pytest.raises(ValidationError, match="pilot_from_main_bore|main_bore_from_pilot"):
+        TrajectoryConfig(pilot_planning_mode="unknown_mode")  # type: ignore[arg-type]
 
 
 def test_normalize_build_dls_bounds_orders_values() -> None:

@@ -1175,6 +1175,24 @@ def test_pilot_sidetrack_summary_df_reports_window_and_pilot_metrics() -> None:
     assert float(row["Суммарный метраж бурения, м"]) == pytest.approx(1750.0)
     assert float(row["Макс ПИ пилота, deg/10m"]) == pytest.approx(1.0)
 
+    main_first_parent = _success(
+        "well_04",
+        summary={
+            **dict(parent.summary),
+            "pilot_planning_mode": "pilot_from_main_bore",
+        },
+    )
+    main_first_result = ptc_batch_results.pilot_sidetrack_summary_df(
+        [pilot, main_first_parent]
+    )
+    main_first_row = main_first_result.iloc[0]
+    assert float(main_first_row["MD ГС от устья до забоя, м"]) == pytest.approx(
+        1670.0
+    )
+    assert float(main_first_row["ГС от окна до забоя, м"]) == pytest.approx(1550.0)
+    assert "MD бокового ствола от устья до забоя, м" not in main_first_result
+    assert "Боковой ствол от окна до забоя, м" not in main_first_result
+
 
 def test_batch_summary_status_counts_classifies_rows() -> None:
     counts = ptc_batch_results.batch_summary_status_counts(
@@ -1211,6 +1229,11 @@ def test_has_md_postcheck_warning_detects_known_problem_text() -> None:
                     )
                 }
             ]
+        )
+    )
+    assert ptc_batch_results.has_md_postcheck_warning(
+        pd.DataFrame(
+            [{"Проблема": "Превышен лимит MD ГС от устья до забоя."}]
         )
     )
     assert not ptc_batch_results.has_md_postcheck_warning(

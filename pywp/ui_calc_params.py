@@ -11,6 +11,7 @@ from pywp.planner_config import (
     INTERPOLATION_METHOD_OPTIONS,
     J_PROFILE_POLICY_OPTIONS,
     OPTIMIZATION_OPTIONS,
+    PILOT_PLANNING_MODE_OPTIONS,
     TURN_SOLVER_OPTIONS,
     build_trajectory_config,
 )
@@ -34,6 +35,7 @@ _FLOAT_SUFFIXES: tuple[str, ...] = (
 _INT_SUFFIXES: tuple[str, ...] = ("turn_solver_max_restarts",)
 _STR_SUFFIXES: tuple[str, ...] = (
     "optimization_mode",
+    "pilot_planning_mode",
     "turn_solver_mode",
     "interpolation_method",
     "j_profile_policy",
@@ -77,6 +79,7 @@ def calc_param_defaults() -> dict[str, float | int | str | bool]:
         "kop_min_vertical": float(cfg.kop_min_vertical_m),
         "min_hold_inc": float(min_hold_inc),
         "optimization_mode": str(cfg.optimization_mode),
+        "pilot_planning_mode": str(cfg.pilot_planning_mode),
         "turn_solver_max_restarts": int(cfg.turn_solver_max_restarts),
         "turn_solver_mode": str(cfg.turn_solver_mode),
         "interpolation_method": str(cfg.interpolation_method),
@@ -90,7 +93,7 @@ def calc_param_defaults() -> dict[str, float | int | str | bool]:
 
 _DEFAULTS_SIGNATURE_KEY_SUFFIX = "__calc_param_defaults_signature__"
 _DEFAULTS_SCHEMA_KEY_SUFFIX = "__calc_param_defaults_schema_version__"
-_DEFAULTS_SCHEMA_VERSION = 17
+_DEFAULTS_SCHEMA_VERSION = 18
 _KOP_MODE_SUFFIX = "kop_min_vertical_mode"
 _KOP_FUNCTION_PAYLOAD_SUFFIX = "kop_min_vertical_function_payload"
 _BUILD2_INPUT_SUFFIX = "dls_build2_optional_input"
@@ -498,6 +501,7 @@ def calc_param_state_values_from_config(
             13.0 if config.min_hold_inc_deg is None else config.min_hold_inc_deg
         ),
         "optimization_mode": str(config.optimization_mode),
+        "pilot_planning_mode": str(config.pilot_planning_mode),
         "turn_solver_max_restarts": int(config.turn_solver_max_restarts),
         "turn_solver_mode": str(config.turn_solver_mode),
         "interpolation_method": str(config.interpolation_method),
@@ -552,6 +556,7 @@ def _build_config_kwargs_from_values(
             else None
         ),
         "optimization_mode": str(values["optimization_mode"]),
+        "pilot_planning_mode": str(values["pilot_planning_mode"]),
         "turn_solver_max_restarts": int(values["turn_solver_max_restarts"]),
         "turn_solver_mode": str(values["turn_solver_mode"]),
         "interpolation_method": str(values["interpolation_method"]),
@@ -793,6 +798,19 @@ def render_calc_params_block(
         st.caption(
             "По умолчанию солвер ищет допустимую траекторию без оптимизации. "
             "Ниже можно включить оптимизацию, выбрать метод и число рестартов."
+        )
+        st.selectbox(
+            "Построение пилота и ГС",
+            options=list(PILOT_PLANNING_MODE_OPTIONS.keys()),
+            key=_state_key(prefix, "pilot_planning_mode"),
+            format_func=lambda key: PILOT_PLANNING_MODE_OPTIONS[str(key)],
+            help=(
+                "Пилот от ГС — сначала строится классическая ГС, затем "
+                "подбираются пилот и окно с минимальной общей проходкой; "
+                "при равной MD выбирается окно ближе к первой PL-точке. "
+                "ГС от пилота — прежняя схема: сначала пилот, затем ГС от его окна."
+            ),
+            **widget_kwargs,
         )
         st.selectbox(
             "Оптимизация",

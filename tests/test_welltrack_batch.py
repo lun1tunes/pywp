@@ -38,7 +38,13 @@ from pywp.eclipse_welltrack import (
     parse_welltrack_points_table,
     parse_welltrack_text,
 )
-from pywp.models import PlannerResult, Point3D, TrajectoryConfig
+from pywp.models import (
+    PILOT_PLANNING_MAIN_BORE_FROM_PILOT,
+    PILOT_PLANNING_PILOT_FROM_MAIN_BORE,
+    PlannerResult,
+    Point3D,
+    TrajectoryConfig,
+)
 from pywp.mcm import compute_positions_min_curv
 from pywp import multi_horizontal as multi_horizontal_module
 from pywp.multi_horizontal import extend_plan_with_multi_horizontal_targets
@@ -60,10 +66,12 @@ from pywp.welltrack_batch import (
     RecordEvaluationResult,
     SuccessfulWellPlan,
     WelltrackBatchPlanner,
+    _evaluate_record_group_from_dicts,
     _evaluate_record_from_dicts,
     _evaluate_record_standalone,
     _optimization_context_from_worker_payload,
     _optimization_context_to_worker_payload,
+    _optimization_context_without_reference_wells,
     _postcheck_state,
     _refresh_pilot_sidetrack_drilled_md_summary,
     merge_batch_results,
@@ -94,6 +102,9 @@ def _fast_batch_config(**overrides: Any) -> TrajectoryConfig:
         "dls_build_max_deg_per_30m": 3.0,
         "dls_horizontal_max_deg_per_30m": 3.0,
         "turn_solver_max_restarts": 0,
+        # Most tests below exercise the historical pilot-first branch.  Tests
+        # for the new default strategy opt into it explicitly.
+        "pilot_planning_mode": PILOT_PLANNING_MAIN_BORE_FROM_PILOT,
     }
     base.update(overrides)
     return TrajectoryConfig(**base)
@@ -386,9 +397,7 @@ def test_multi_horizontal_transition_uses_horizontal_dls_limit() -> None:
         md_t1_m=0.0,
     )
     uncertainty_reference = base_result.stations.copy(deep=True)
-    base_result.stations.attrs["uncertainty_reference_stations"] = (
-        uncertainty_reference
-    )
+    base_result.stations.attrs["uncertainty_reference_stations"] = uncertainty_reference
     target_pairs = (
         (Point3D(-500.0, 0.0, 1000.0), Point3D(0.0, 0.0, 1000.0)),
         (Point3D(800.0, 0.0, 1100.0), Point3D(1300.0, 0.0, 1100.0)),
@@ -422,9 +431,7 @@ def test_multi_horizontal_transition_uses_horizontal_dls_limit() -> None:
     assert float(horizontal_build_dls.max()) > 2.7
     assert float(horizontal_build_dls.quantile(0.9)) > 2.4
     assert result.summary["dls_limit_horizontal_deg_per_30m"] == pytest.approx(3.0)
-    preserved_reference = result.stations.attrs.get(
-        "uncertainty_reference_stations"
-    )
+    preserved_reference = result.stations.attrs.get("uncertainty_reference_stations")
     assert isinstance(preserved_reference, pd.DataFrame)
     assert preserved_reference is not uncertainty_reference
     pd.testing.assert_frame_equal(preserved_reference, uncertainty_reference)
@@ -553,9 +560,7 @@ def test_multi_horizontal_allows_feasible_arc_longer_than_its_chord() -> None:
         config=config,
     )
 
-    transition = result.stations.loc[
-        result.stations["segment"] == "HORIZONTAL_BUILD1"
-    ]
+    transition = result.stations.loc[result.stations["segment"] == "HORIZONTAL_BUILD1"]
     assert not transition.empty
     assert float(transition["DLS_deg_per_30m"].max()) <= 3.0 + 1e-6
     assert float(transition.iloc[-1]["X_m"]) == pytest.approx(next_t1.x, abs=1e-4)
@@ -662,9 +667,7 @@ def test_multi_horizontal_validates_curve_inc_instead_of_chord_inc() -> None:
         config=config,
     )
 
-    transition = result.stations.loc[
-        result.stations["segment"] == "HORIZONTAL_BUILD1"
-    ]
+    transition = result.stations.loc[result.stations["segment"] == "HORIZONTAL_BUILD1"]
     assert not transition.empty
     assert float(transition["INC_deg"].max()) <= inc_deg + 1e-6
     assert float(transition["DLS_deg_per_30m"].max()) <= 6.0 + 1e-6
@@ -3675,6 +3678,55 @@ def test_anti_collision_context_worker_payload_restores_nested_dataclasses() -> 
         assert evaluation.min_separation_factor >= 0.0
 
 
+def test_main_first_pair_drops_only_its_stale_pilot_from_optimization_context() -> None:
+    stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 1000.0, 2000.0],
+            "INC_deg": [0.0, 45.0, 90.0],
+            "AZI_deg": [0.0, 90.0, 90.0],
+            "X_m": [0.0, 500.0, 1400.0],
+            "Y_m": [0.0, 0.0, 0.0],
+            "Z_m": [0.0, 800.0, 1000.0],
+        }
+    )
+
+    def reference(name: str, x_shift_m: float):
+        shifted = stations.copy()
+        shifted["X_m"] = shifted["X_m"] + float(x_shift_m)
+        return build_anti_collision_reference_path(
+            well_name=name,
+            stations=shifted,
+            md_start_m=0.0,
+            md_end_m=2000.0,
+            sample_step_m=100.0,
+            model=DEFAULT_PLANNING_UNCERTAINTY_MODEL,
+        )
+
+    context = AntiCollisionOptimizationContext(
+        candidate_md_start_m=0.0,
+        candidate_md_end_m=2000.0,
+        sf_target=1.0,
+        sample_step_m=100.0,
+        uncertainty_model=DEFAULT_PLANNING_UNCERTAINTY_MODEL,
+        references=(
+            reference("WELL-04PL", 0.0),
+            reference("NEIGHBOUR", 500.0),
+        ),
+        prefer_keep_kop=True,
+    )
+
+    filtered = _optimization_context_without_reference_wells(
+        context=context,
+        excluded_well_names=("well-04_pl",),
+    )
+
+    assert filtered is not None
+    assert tuple(item.well_name for item in filtered.references) == ("NEIGHBOUR",)
+    assert filtered.prefer_keep_kop is True
+    assert filtered.candidate_md_start_m == pytest.approx(0.0)
+    assert filtered.candidate_md_end_m == pytest.approx(2000.0)
+
+
 @pytest.mark.integration
 def test_batch_worker_entrypoint_runs_under_spawn_context() -> None:
     record = WelltrackRecord(
@@ -3699,6 +3751,55 @@ def test_batch_worker_entrypoint_runs_under_spawn_context() -> None:
     assert row["Статус"] == "OK"
     assert success_dict is not None
     assert success_dict["name"] == "SPAWN-1"
+
+
+@pytest.mark.integration
+def test_main_first_dependency_group_worker_runs_under_spawn_context() -> None:
+    parent = WelltrackRecord(
+        name="SPAWN-PAIR",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=800.0, y=0.0, z=2200.0, md=1.0),
+            WelltrackPoint(x=1800.0, y=0.0, z=2200.0, md=2.0),
+        ),
+    )
+    pilot = WelltrackRecord(
+        name="SPAWN-PAIR_PL",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=260.0, y=100.0, z=1200.0, md=1.0),
+            WelltrackPoint(x=300.0, y=120.0, z=1450.0, md=2.0),
+        ),
+    )
+    config = TrajectoryConfig(
+        md_step_m=25.0,
+        md_step_control_m=5.0,
+        kop_min_vertical_m=200.0,
+        dls_build_max_deg_per_30m=12.0,
+        dls_horizontal_max_deg_per_30m=3.0,
+        max_inc_deg=110.0,
+        turn_solver_max_restarts=0,
+        pilot_planning_mode=PILOT_PLANNING_PILOT_FROM_MAIN_BORE,
+    )
+
+    ctx = multiprocessing.get_context("spawn")
+    with ProcessPoolExecutor(max_workers=1, mp_context=ctx) as pool:
+        rows, success_dicts, executed_names = pool.submit(
+            _evaluate_record_group_from_dicts,
+            (parent.model_dump(), pilot.model_dump()),
+            config.model_dump(),
+        ).result(timeout=120)
+
+    assert executed_names == ("SPAWN-PAIR", "SPAWN-PAIR_PL")
+    assert [str(row["Статус"]) for row in rows] == ["OK", "OK"]
+    successes = {
+        str(payload["name"]): SuccessfulWellPlan.model_validate(payload)
+        for payload in success_dicts
+    }
+    assert set(successes) == {"SPAWN-PAIR", "SPAWN-PAIR_PL"}
+    assert successes["SPAWN-PAIR"].summary["pilot_planning_mode"] == (
+        PILOT_PLANNING_PILOT_FROM_MAIN_BORE
+    )
 
 
 @pytest.mark.integration
@@ -3909,6 +4010,8 @@ def test_batch_planner_parallelizes_independent_wells_when_pilot_dependency_exis
         recalculated_success_by_name=None,
         sidetrack_window_override=None,
         actual_reference_wells_by_key=None,
+        pilot_records_by_key=None,
+        pilot_configs_by_key=None,
     ):
         dependent_calls.append(
             (
@@ -3921,7 +4024,11 @@ def test_batch_planner_parallelizes_independent_wells_when_pilot_dependency_exis
         return row, _straight_success(str(record.name), y_offset_m=10.0)
 
     monkeypatch.setattr(batch_module, "ProcessPoolExecutor", InlineExecutor)
-    monkeypatch.setattr(WelltrackBatchPlanner, "_evaluate_record", fake_evaluate_record)
+    monkeypatch.setattr(
+        WelltrackBatchPlanner,
+        "_evaluate_record",
+        fake_evaluate_record,
+    )
     records = [
         WelltrackRecord(
             name="WELL-A",
@@ -3974,6 +4081,292 @@ def test_batch_planner_parallelizes_independent_wells_when_pilot_dependency_exis
     assert {total for _index, total, _name in progress_events} == {3}
 
 
+def test_parallel_pilot_dependency_path_passes_pilot_record_and_config_maps(
+    monkeypatch,
+) -> None:
+    observed_calls: list[
+        tuple[str, dict[str, WelltrackRecord], dict[str, TrajectoryConfig]]
+    ] = []
+
+    def fake_evaluate_record(
+        self,
+        *,
+        record,
+        pilot_records_by_key=None,
+        pilot_configs_by_key=None,
+        **kwargs,
+    ):
+        observed_calls.append(
+            (
+                str(record.name),
+                dict(pilot_records_by_key or {}),
+                dict(pilot_configs_by_key or {}),
+            )
+        )
+        row = WelltrackBatchPlanner._base_row(record)
+        row["Статус"] = "OK"
+        return row, _straight_success(str(record.name), y_offset_m=0.0)
+
+    monkeypatch.setattr(WelltrackBatchPlanner, "_evaluate_record", fake_evaluate_record)
+    parent = WelltrackRecord(
+        name="WELL-C",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=100.0, y=0.0, z=1200.0, md=1200.0),
+            WelltrackPoint(x=500.0, y=0.0, z=1200.0, md=1600.0),
+        ),
+    )
+    pilot = WelltrackRecord(
+        name="WELL-C_PL",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=80.0, y=0.0, z=800.0, md=800.0),
+        ),
+    )
+    config = _fast_batch_config(
+        pilot_planning_mode=PILOT_PLANNING_PILOT_FROM_MAIN_BORE,
+    )
+    pilot_config = config.model_copy(update={"md_step_m": 7.5})
+
+    rows, successes = (
+        WelltrackBatchPlanner()._evaluate_parallel_with_pilot_dependencies(
+            selected_records=[pilot, parent],
+            config=config,
+            config_by_name={str(pilot.name): pilot_config},
+            optimization_context_by_name=None,
+            reference_wells=(),
+            actual_reference_wells_by_key={},
+            sidetrack_window_overrides_by_key={},
+            progress_callback=None,
+            solver_progress_callback=None,
+            record_done_callback=None,
+            parallel_workers=2,
+        )
+    )
+
+    assert [name for name, _records, _configs in observed_calls] == [
+        "WELL-C_PL",
+        "WELL-C",
+    ]
+    for _name, pilot_records, pilot_configs in observed_calls:
+        assert pilot_records == {"well-c_pl": pilot}
+        assert pilot_configs == {"well-c_pl": pilot_config}
+    assert [str(row["Скважина"]) for row in rows] == ["WELL-C_PL", "WELL-C"]
+    assert {str(success.name) for success in successes} == {
+        "WELL-C_PL",
+        "WELL-C",
+    }
+
+
+def test_batch_planner_parallelizes_independent_main_first_dependency_groups(
+    monkeypatch,
+) -> None:
+    import pywp.welltrack_batch as batch_module
+
+    submitted_groups: list[tuple[str, ...]] = []
+
+    class InlineExecutor:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def submit(
+            self,
+            _fn,
+            record_dicts,
+            _config_dict,
+            _config_by_name_dict,
+            _optimization_context_by_name_dict,
+            _reference_well_dicts,
+            _sidetrack_window_overrides_by_name_dict,
+            **kwargs,
+        ) -> Future:
+            records = tuple(
+                WelltrackRecord.model_validate(payload) for payload in record_dicts
+            )
+            names = tuple(str(record.name) for record in records)
+            submitted_groups.append(names)
+            rows: list[dict[str, Any]] = []
+            successes: list[dict] = []
+            for index, record in enumerate(records):
+                row = WelltrackBatchPlanner._base_row(record)
+                row["Статус"] = "OK"
+                rows.append(row)
+                successes.append(
+                    _straight_success(
+                        str(record.name),
+                        y_offset_m=float(index),
+                    ).model_dump()
+                )
+            future: Future = Future()
+            future.set_result((rows, successes, names))
+            return future
+
+        def shutdown(self, *, wait: bool = True) -> None:
+            pass
+
+    monkeypatch.setattr(batch_module, "ProcessPoolExecutor", InlineExecutor)
+    parent = WelltrackRecord(
+        name="WELL-A",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=100.0, y=0.0, z=1200.0, md=1200.0),
+            WelltrackPoint(x=500.0, y=0.0, z=1200.0, md=1600.0),
+        ),
+    )
+    pilot = WelltrackRecord(
+        name="WELL-A_PL",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=80.0, y=0.0, z=800.0, md=800.0),
+        ),
+    )
+    independent = WelltrackRecord(
+        name="WELL-B",
+        points=(
+            WelltrackPoint(x=0.0, y=30.0, z=0.0, md=0.0),
+            WelltrackPoint(x=100.0, y=30.0, z=1200.0, md=1200.0),
+            WelltrackPoint(x=500.0, y=30.0, z=1200.0, md=1600.0),
+        ),
+    )
+    progress_events: list[tuple[int, int, str]] = []
+
+    rows, successes = WelltrackBatchPlanner().evaluate(
+        records=[parent, pilot, independent],
+        selected_names={"WELL-A", "WELL-B"},
+        config=_fast_batch_config(
+            pilot_planning_mode=PILOT_PLANNING_PILOT_FROM_MAIN_BORE
+        ),
+        progress_callback=lambda index, total, name: progress_events.append(
+            (int(index), int(total), str(name))
+        ),
+        parallel_workers=4,
+    )
+
+    assert submitted_groups == [("WELL-A", "WELL-A_PL"), ("WELL-B",)]
+    assert [str(row["Скважина"]) for row in rows] == [
+        "WELL-A",
+        "WELL-A_PL",
+        "WELL-B",
+    ]
+    assert {str(success.name) for success in successes} == {
+        "WELL-A",
+        "WELL-A_PL",
+        "WELL-B",
+    }
+    assert sorted(index for index, _total, _name in progress_events) == [1, 2, 3]
+    assert {total for _index, total, _name in progress_events} == {3}
+
+
+def test_mixed_pilot_modes_have_stable_dependency_order() -> None:
+    pilot = WelltrackRecord(
+        name="WELL-04_PL",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=100.0, y=0.0, z=900.0, md=1.0),
+        ),
+    )
+    legacy_parent = WelltrackRecord(
+        name="WELL-04",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=700.0, y=0.0, z=2000.0, md=1.0),
+            WelltrackPoint(x=1700.0, y=0.0, z=2000.0, md=2.0),
+        ),
+    )
+    main_first_parent = legacy_parent.model_copy(update={"name": "WELL-04_2"})
+    legacy_config = _fast_batch_config(
+        pilot_planning_mode=PILOT_PLANNING_MAIN_BORE_FROM_PILOT
+    )
+    main_first_config = legacy_config.validated_copy(
+        pilot_planning_mode=PILOT_PLANNING_PILOT_FROM_MAIN_BORE
+    )
+
+    ordered = WelltrackBatchPlanner._selected_records_in_order(
+        records=[legacy_parent, pilot, main_first_parent],
+        selected_names={"WELL-04", "WELL-04_PL", "WELL-04_2"},
+        selected_order=["WELL-04", "WELL-04_PL", "WELL-04_2"],
+        base_config=legacy_config,
+        config_by_name={"WELL-04_2": main_first_config},
+    )
+
+    assert [str(record.name) for record in ordered] == [
+        "WELL-04_2",
+        "WELL-04_PL",
+        "WELL-04",
+    ]
+
+
+def test_mixed_pilot_modes_execute_main_then_pilot_then_legacy_parent(
+    monkeypatch,
+) -> None:
+    pilot = WelltrackRecord(
+        name="WELL-04_PL",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=100.0, y=0.0, z=900.0, md=1.0),
+        ),
+    )
+    legacy_parent = WelltrackRecord(
+        name="WELL-04",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=700.0, y=0.0, z=2000.0, md=1.0),
+            WelltrackPoint(x=1700.0, y=0.0, z=2000.0, md=2.0),
+        ),
+    )
+    main_first_parent = legacy_parent.model_copy(update={"name": "WELL-04_2"})
+    legacy_config = _fast_batch_config(
+        pilot_planning_mode=PILOT_PLANNING_MAIN_BORE_FROM_PILOT
+    )
+    main_first_config = legacy_config.validated_copy(
+        pilot_planning_mode=PILOT_PLANNING_PILOT_FROM_MAIN_BORE
+    )
+    optimized_pilot = _straight_success("WELL-04_PL", y_offset_m=0.0).validated_copy(
+        summary={"pilot_planning_mode": PILOT_PLANNING_PILOT_FROM_MAIN_BORE}
+    )
+    evaluation_calls: list[str] = []
+    done_names: list[str] = []
+
+    def fake_evaluate_record(self, *, record, **kwargs):
+        name = str(record.name)
+        evaluation_calls.append(name)
+        success = _straight_success(name, y_offset_m=10.0)
+        row = self._row_from_success(record=record, success=success)
+        if name == "WELL-04_2":
+            return RecordEvaluationResult(
+                row=row,
+                success=success,
+                updated_pilot_success=optimized_pilot,
+            )
+        assert name == "WELL-04"
+        assert "WELL-04_PL" in {
+            str(key) for key in kwargs["recalculated_success_by_name"]
+        }
+        return row, success
+
+    monkeypatch.setattr(
+        WelltrackBatchPlanner,
+        "_evaluate_record",
+        fake_evaluate_record,
+    )
+
+    rows, successes = WelltrackBatchPlanner().evaluate(
+        records=[legacy_parent, pilot, main_first_parent],
+        selected_names={"WELL-04", "WELL-04_PL", "WELL-04_2"},
+        selected_order=["WELL-04", "WELL-04_PL", "WELL-04_2"],
+        config=legacy_config,
+        config_by_name={"WELL-04_2": main_first_config},
+        record_done_callback=lambda _i, _total, name, _row: done_names.append(
+            str(name)
+        ),
+    )
+
+    assert evaluation_calls == ["WELL-04_2", "WELL-04"]
+    assert done_names == ["WELL-04_2", "WELL-04_PL", "WELL-04"]
+    assert [str(row["Скважина"]) for row in rows] == done_names
+    assert {str(success.name) for success in successes} == set(done_names)
+
+
 def test_parent_selection_calculates_pilot_before_sidetrack() -> None:
     pilot = WelltrackRecord(
         name="WELL-04_PL",
@@ -4009,6 +4402,175 @@ def test_parent_selection_calculates_pilot_before_sidetrack() -> None:
     assert by_name["WELL-04"].summary["trajectory_type"] == "PILOT_SIDETRACK"
     assert by_name["WELL-04"].summary["pilot_well_name"] == "WELL-04_PL"
     assert by_name["WELL-04"].md_t1_m > by_name["WELL-04_PL"].md_t1_m
+
+
+def test_default_pilot_from_main_bore_keeps_optimized_pilot_result() -> None:
+    pilot = WelltrackRecord(
+        name="WELL-04_PL",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=260.0, y=100.0, z=1200.0, md=1.0),
+            WelltrackPoint(x=300.0, y=120.0, z=1450.0, md=2.0),
+        ),
+    )
+    parent = WelltrackRecord(
+        name="WELL-04",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=800.0, y=0.0, z=2200.0, md=1.0),
+            WelltrackPoint(x=1800.0, y=0.0, z=2200.0, md=2.0),
+        ),
+    )
+    config = TrajectoryConfig(
+        md_step_m=25.0,
+        md_step_control_m=5.0,
+        kop_min_vertical_m=200.0,
+        dls_build_max_deg_per_30m=12.0,
+        dls_horizontal_max_deg_per_30m=3.0,
+        max_inc_deg=110.0,
+        turn_solver_max_restarts=0,
+        pilot_planning_mode=PILOT_PLANNING_PILOT_FROM_MAIN_BORE,
+    )
+    done_names: list[str] = []
+
+    rows, successes = WelltrackBatchPlanner().evaluate(
+        records=[pilot, parent],
+        selected_names={"WELL-04"},
+        selected_order=["WELL-04_PL", "WELL-04"],
+        config=config,
+        record_done_callback=lambda _i, _t, name, _row: done_names.append(str(name)),
+        parallel_workers=4,
+    )
+
+    assert done_names == ["WELL-04", "WELL-04_PL"]
+    assert [str(row["Скважина"]) for row in rows] == ["WELL-04", "WELL-04_PL"]
+    assert {str(row["Статус"]) for row in rows} == {"OK"}
+    assert str(rows[0]["Классификация целей"]) == "Пилот от ГС"
+    assert str(rows[1]["Классификация целей"]) == "Пилот"
+    by_name = {str(success.name): success for success in successes}
+    main = by_name["WELL-04"]
+    optimized_pilot = by_name["WELL-04_PL"]
+    assert main.summary["pilot_planning_mode"] == PILOT_PLANNING_PILOT_FROM_MAIN_BORE
+    assert optimized_pilot.summary["pilot_planning_mode"] == (
+        PILOT_PLANNING_PILOT_FROM_MAIN_BORE
+    )
+    assert main.summary["trajectory_target_direction"] == "Пилот от ГС"
+    assert main.summary["total_drilled_md_m"] == pytest.approx(
+        float(main.stations["MD_m"].iloc[-1])
+        + float(optimized_pilot.stations["MD_m"].iloc[-1])
+        - float(main.summary["sidetrack_window_md_m"])
+    )
+    assert main.summary["pilot_tail_md_from_window_m"] == pytest.approx(
+        float(optimized_pilot.stations["MD_m"].iloc[-1])
+        - float(main.summary["sidetrack_window_md_m"])
+    )
+    assert float(main.summary["pilot_window_distance_to_first_pl_m"]) > 0.0
+    assert float(main.summary["pilot_window_search_resolution_m"]) == pytest.approx(0.5)
+    assert main.summary["pilot_window_selection_objective"] == (
+        "min_total_drilled_md_then_first_pl_proximity"
+    )
+    assert (
+        main.summary["pilot_leg_dls_deg_per_30m"]
+        == (optimized_pilot.summary["pilot_leg_dls_deg_per_30m"])
+    )
+    assert (
+        main.summary["pilot_tail_optimization"]
+        == (optimized_pilot.summary["pilot_tail_optimization"])
+    )
+    assert str(optimized_pilot.summary["well_complexity"]) == "Пилот от ГС"
+
+
+def test_pilot_from_main_bore_does_not_fallback_to_standalone_pilot_when_main_fails() -> (
+    None
+):
+    class FailingMainPlanner:
+        def plan(self, **_kwargs):
+            raise PlanningError("main solve failed")
+
+    pilot = WelltrackRecord(
+        name="WELL-04_PL",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=260.0, y=100.0, z=1200.0, md=1.0),
+            WelltrackPoint(x=300.0, y=120.0, z=1450.0, md=2.0),
+        ),
+    )
+    parent = WelltrackRecord(
+        name="WELL-04",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=800.0, y=0.0, z=2200.0, md=1.0),
+            WelltrackPoint(x=1800.0, y=0.0, z=2200.0, md=2.0),
+        ),
+    )
+    config = _fast_batch_config(
+        kop_min_vertical_m=200.0,
+        dls_build_max_deg_per_30m=12.0,
+        pilot_planning_mode=PILOT_PLANNING_PILOT_FROM_MAIN_BORE,
+    )
+    done_names: list[str] = []
+
+    rows, successes = WelltrackBatchPlanner(
+        planner=FailingMainPlanner()  # type: ignore[arg-type]
+    ).evaluate(
+        records=[pilot, parent],
+        selected_names={"WELL-04"},
+        selected_order=["WELL-04_PL", "WELL-04"],
+        config=config,
+        record_done_callback=lambda _i, _t, name, _row: done_names.append(str(name)),
+    )
+
+    assert done_names == ["WELL-04", "WELL-04_PL"]
+    assert successes == []
+    rows_by_name = {str(row["Скважина"]): row for row in rows}
+    assert rows_by_name["WELL-04"]["Статус"] == "Ошибка расчета"
+    assert rows_by_name["WELL-04_PL"]["Статус"] == "Ошибка расчета"
+    assert "main solve failed" in str(rows_by_name["WELL-04"]["Проблема"])
+    assert "не дала готовую траекторию" in str(rows_by_name["WELL-04_PL"]["Проблема"])
+
+
+def test_pilot_from_main_bore_rejects_two_productive_bores_for_one_pilot() -> None:
+    class UnexpectedPlanner:
+        def plan(self, **_kwargs):
+            raise AssertionError("ambiguous pair must fail before solver execution")
+
+    pilot = WelltrackRecord(
+        name="WELL-04_PL",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=0.0, y=0.0, z=1000.0, md=1.0),
+        ),
+    )
+    parent = WelltrackRecord(
+        name="WELL-04",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=800.0, y=0.0, z=2200.0, md=1.0),
+            WelltrackPoint(x=1800.0, y=0.0, z=2200.0, md=2.0),
+        ),
+    )
+    alternate_parent = WelltrackRecord(
+        name="WELL-04_2",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=900.0, y=100.0, z=2200.0, md=1.0),
+            WelltrackPoint(x=1900.0, y=100.0, z=2200.0, md=2.0),
+        ),
+    )
+    config = _fast_batch_config(pilot_planning_mode=PILOT_PLANNING_PILOT_FROM_MAIN_BORE)
+
+    rows, successes = WelltrackBatchPlanner(
+        planner=UnexpectedPlanner()  # type: ignore[arg-type]
+    ).evaluate(
+        records=[parent, alternate_parent, pilot],
+        selected_names={"WELL-04", "WELL-04_2"},
+        config=config,
+    )
+
+    assert successes == []
+    assert {str(row["Статус"]) for row in rows} == {"Ошибка расчета"}
+    assert all("неоднозначно связан" in str(row["Проблема"]) for row in rows)
+    assert all("WELL-04, WELL-04_2" in str(row["Проблема"]) for row in rows)
 
 
 def test_pilot_dev_import_enables_parent_pilot_sidetrack() -> None:

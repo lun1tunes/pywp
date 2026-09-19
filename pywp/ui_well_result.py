@@ -11,6 +11,7 @@ from pywp.md_metrics import (
     md_postcheck_issue_message_ru,
     md_total_display_label_ru,
     parent_bore_md_display_label_ru,
+    sidetrack_branch_md_display_label_ru,
 )
 from pywp.models import Point3D, SummaryValue, TrajectoryConfig
 from pywp.planner_config import optimization_display_label
@@ -326,7 +327,7 @@ def build_key_metrics_rows(view: SingleWellResultView) -> list[dict[str, str]]:
         if lateral_md_m is not None:
             md_rows.append(
                 {
-                    "Показатель": "Боковой ствол от окна до забоя",
+                    "Показатель": sidetrack_branch_md_display_label_ru(summary),
                     "Значение": format_distance(lateral_md_m),
                 }
             )
@@ -675,6 +676,8 @@ def render_result_tables(
                 label = f"{md_total_display_label_ru(summary)}, м"
             elif key == "pilot_total_md_m":
                 label = f"{parent_bore_md_display_label_ru(summary)}, м"
+            elif key == "sidetrack_complete_lateral_md_m":
+                label = f"{sidetrack_branch_md_display_label_ru(summary)}, м"
             elif key == "max_total_md_postcheck_m":
                 label = f"Лимит {md_total_display_label_ru(summary)}, м"
             main_rows.append(

@@ -36,6 +36,17 @@ OptimizationMode = Literal[
     "minimize_kop",
     "anti_collision_avoidance",
 ]
+
+PILOT_PLANNING_PILOT_FROM_MAIN_BORE = "pilot_from_main_bore"
+PILOT_PLANNING_MAIN_BORE_FROM_PILOT = "main_bore_from_pilot"
+ALLOWED_PILOT_PLANNING_MODES = (
+    PILOT_PLANNING_PILOT_FROM_MAIN_BORE,
+    PILOT_PLANNING_MAIN_BORE_FROM_PILOT,
+)
+PilotPlanningMode = Literal[
+    "pilot_from_main_bore",
+    "main_bore_from_pilot",
+]
 TURN_SOLVER_LEAST_SQUARES = "least_squares"
 TURN_SOLVER_DE_HYBRID = "de_hybrid"
 ALLOWED_TURN_SOLVER_MODES = (TURN_SOLVER_LEAST_SQUARES, TURN_SOLVER_DE_HYBRID)
@@ -57,6 +68,10 @@ __all__ = [
     "OPTIMIZATION_ANTI_COLLISION_AVOIDANCE",
     "ALLOWED_OPTIMIZATION_MODES",
     "OptimizationMode",
+    "PILOT_PLANNING_PILOT_FROM_MAIN_BORE",
+    "PILOT_PLANNING_MAIN_BORE_FROM_PILOT",
+    "ALLOWED_PILOT_PLANNING_MODES",
+    "PilotPlanningMode",
     "TURN_SOLVER_LEAST_SQUARES",
     "TURN_SOLVER_DE_HYBRID",
     "ALLOWED_TURN_SOLVER_MODES",
@@ -182,6 +197,7 @@ class TrajectoryConfig(FrozenModel):
     # Does not participate in solver search/optimization constraints.
     max_total_md_postcheck_m: PositiveFiniteScalar = 6500.0
     optimization_mode: OptimizationMode = OPTIMIZATION_MINIMIZE_MD
+    pilot_planning_mode: PilotPlanningMode = PILOT_PLANNING_PILOT_FROM_MAIN_BORE
     turn_solver_mode: TurnSolverMode = TURN_SOLVER_LEAST_SQUARES
     turn_solver_max_restarts: NonNegativeInt = 1
     interpolation_method: InterpolationMethod = INTERPOLATION_RODRIGUES

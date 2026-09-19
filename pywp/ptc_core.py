@@ -110,7 +110,6 @@ from pywp.eclipse_welltrack import (
     WelltrackPoint,
     WelltrackRecord,
     parse_welltrack_text,
-    welltrack_points_to_target_pairs,
 )
 from pywp.models import Point3D
 from pywp.models import J_PROFILE_POLICY_PREFER
@@ -312,6 +311,7 @@ _CALC_PARAM_OVERRIDE_LABELS: dict[str, str] = {
     "min_hold_inc_enabled": "Мин HOLD отдельно",
     "min_hold_inc": "Мин HOLD, deg",
     "optimization_mode": "Оптимизация",
+    "pilot_planning_mode": "Пилот / ГС",
     "turn_solver_max_restarts": "Рестарты",
     "turn_solver_mode": "Метод",
     "interpolation_method": "Интерполяция",
@@ -1558,6 +1558,7 @@ _ANTI_COLLISION_SIGNATURE_CONFIG_FIELDS = (
     "dls_build2_max_deg_per_30m",
     "dls_horizontal_max_deg_per_30m",
     "optimization_mode",
+    "pilot_planning_mode",
 )
 
 
@@ -6746,7 +6747,7 @@ def _render_target_table_help() -> None:
         "Можно также использовать имя `fact_01_2`. Точку `S` для такого ЗБС указывать не нужно: система берёт старт из уже загруженной фактической скважины. Имя `fact_well` должно совпадать с именем загруженной фактической скважины.",
     )
     _render_example(
-        "Пилот и обычный боковой ствол",
+        "Пилот и продуктивный ствол",
         [
             {
                 "Wellname": "well_01_PL",
@@ -6777,7 +6778,7 @@ def _render_target_table_help() -> None:
                 "Z": "Z3",
             },
         ],
-        "Ствол от пилота можно задать именем `well_01` или `well_01_2`. Пилот `well_01_PL` и боковой ствол нужно загружать вместе. Для такого ствола можно использовать обычные точки `t1`/`t3`, а точку `S` можно задать явно или не задавать: если она не задана, система возьмёт устье из пилота.",
+        "Парную систему можно задать именами `well_01` или `well_01_2` и `well_01_PL`. Обе записи загружаются вместе. Порядок построения задаётся параметром солвера `Пилот от ГС` / `ГС от пилота`. Для продуктивного ствола используйте точки `t1`/`t3`; общую точку `S` можно задать явно или опустить.",
     )
     _render_example(
         "Пилот и ствол с последовательностью целей",
@@ -6825,10 +6826,10 @@ def _render_target_table_help() -> None:
                 "Z": "Z4",
             },
         ],
-        "Для бокового ствола от пилота можно задавать произвольную последовательность целей `t1`, `t2`, `t3`, ... без пропусков. Работают оба имени: `well_01` и `well_01_2`. Точку `S` можно добавить, а можно не добавлять.",
+        "Для продуктивного ствола в паре с пилотом можно задавать последовательность целей `t1`, `t2`, `t3`, ... без пропусков. Работают оба имени: `well_01` и `well_01_2`. Точку `S` можно добавить или опустить.",
     )
     _render_example(
-        "Пилот и многопластовый боковой ствол",
+        "Пилот и многопластовый продуктивный ствол",
         [
             {
                 "Wellname": "well_02_PL",
@@ -6873,7 +6874,7 @@ def _render_target_table_help() -> None:
                 "Z": "Z2_3",
             },
         ],
-        "Для бокового ствола от пилота работают и многопластовые пары `1_t1/1_t3`, `2_t1/2_t3`, ... . Имя можно задавать как `well_02`, так и `well_02_2`; точка `S` для такого ствола может быть и задана, и опущена.",
+        "Для продуктивного ствола в паре с пилотом работают и многопластовые пары `1_t1/1_t3`, `2_t1/2_t3`, ... . Имя можно задавать как `well_02`, так и `well_02_2`; общую точку `S` можно задать или опустить.",
     )
     _render_example(
         "Многопластовая скважина",
@@ -8610,7 +8611,7 @@ def _render_actual_fund_analysis_panel(
     if analyses is None:
         try:
             analyses = _actual_fund_analyses(actual_wells)
-        except Exception as exc:
+        except Exception:
             with st.expander("Анализ фактического фонда", expanded=False):
                 st.error(
                     "Не удалось построить анализ фактического фонда для загруженных скважин."

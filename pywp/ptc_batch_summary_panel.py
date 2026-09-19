@@ -285,6 +285,12 @@ def render_batch_summary(
                 "Боковой ствол от окна до забоя, м": st_module.column_config.NumberColumn(
                     "От окна до забоя, м", format="%.2f", width="small"
                 ),
+                "MD ГС от устья до забоя, м": st_module.column_config.NumberColumn(
+                    "MD ГС, м", format="%.2f", width="small"
+                ),
+                "ГС от окна до забоя, м": st_module.column_config.NumberColumn(
+                    "ГС от окна до забоя, м", format="%.2f", width="small"
+                ),
                 "Суммарный метраж бурения, м": st_module.column_config.NumberColumn(
                     "Метраж бурения, м", format="%.2f", width="small"
                 ),

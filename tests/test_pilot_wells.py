@@ -6,7 +6,12 @@ import pytest
 
 from pywp.eclipse_welltrack import WelltrackPoint, WelltrackRecord
 from pywp.mcm import compute_positions_min_curv
-from pywp.models import PlannerResult, Point3D, TrajectoryConfig
+from pywp.models import (
+    PILOT_PLANNING_PILOT_FROM_MAIN_BORE,
+    PlannerResult,
+    Point3D,
+    TrajectoryConfig,
+)
 from pywp.pilot_wells import (
     PilotWindow,
     SidetrackWindowOverride,
@@ -19,6 +24,7 @@ from pywp.pilot_wells import (
     parent_name_for_pilot,
     parent_name_for_zbs,
     paired_pilot_parent_names,
+    plan_pilot_from_main_bore,
     pilot_parent_key_for_record,
     plan_reoriented_pilot_sidetrack_fallback,
     select_sidetrack_window,
@@ -237,6 +243,408 @@ def test_build_pilot_trajectory_starts_vertical_before_building_to_targets() -> 
     assert {"VERTICAL", "PILOT_BUILD_1", "PILOT_HOLD_1", "PILOT_BUILD_2"}.issubset(
         set(pilot.stations["segment"])
     )
+
+
+def test_pilot_from_main_bore_optimizes_total_drilled_md() -> None:
+    config = TrajectoryConfig(
+        md_step_m=25.0,
+        md_step_control_m=5.0,
+        kop_min_vertical_m=200.0,
+        dls_build_max_deg_per_30m=12.0,
+        dls_horizontal_max_deg_per_30m=3.0,
+        max_inc_deg=110.0,
+        turn_solver_max_restarts=0,
+    )
+    surface = Point3D(0.0, 0.0, 0.0)
+    main = pilot_wells.TrajectoryPlanner().plan(
+        surface=surface,
+        t1=Point3D(800.0, 0.0, 2200.0),
+        t3=Point3D(1800.0, 0.0, 2200.0),
+        config=config,
+    )
+    pilot_targets = (
+        surface,
+        Point3D(260.0, 100.0, 1200.0),
+        Point3D(300.0, 120.0, 1450.0),
+    )
+
+    planned = plan_pilot_from_main_bore(
+        pilot_name="WELL-04_PL",
+        parent_name="WELL-04",
+        pilot_target_points=pilot_targets,
+        main_bore=main,
+        pilot_config=config,
+        main_config=config,
+    )
+
+    assert planned.pilot.summary["pilot_planning_mode"] == (
+        PILOT_PLANNING_PILOT_FROM_MAIN_BORE
+    )
+    assert float(planned.window.point.z) < float(pilot_targets[1].z)
+    assert planned.total_drilled_md_m == pytest.approx(
+        float(main.stations["MD_m"].iloc[-1])
+        + float(planned.pilot.md_total_m)
+        - float(planned.window.md_m)
+    )
+    assert planned.pilot_tail_md_m == pytest.approx(
+        float(planned.pilot.md_total_m) - float(planned.window.md_m)
+    )
+    assert planned.window_to_first_pl_m == pytest.approx(
+        np.linalg.norm(
+            np.asarray(
+                [
+                    planned.window.point.x - pilot_targets[1].x,
+                    planned.window.point.y - pilot_targets[1].y,
+                    planned.window.point.z - pilot_targets[1].z,
+                ]
+            )
+        )
+    )
+    assert planned.window_search_resolution_m == pytest.approx(0.5)
+    main_md = float(main.stations["MD_m"].iloc[-1])
+    main_md_values = main.stations["MD_m"].to_numpy(dtype=float)
+    grid_scores: list[float] = []
+    min_window_md = float(config.min_structural_segment_m)
+    max_window_md = float(main.md_t1_m) - float(config.min_structural_segment_m)
+    for candidate_md in np.arange(
+        min_window_md,
+        max_window_md + 1e-9,
+        float(config.md_step_control_m),
+    ):
+        row = pilot_wells._interpolate_main_bore_window_by_md(
+            main.stations,
+            float(candidate_md),
+            main_md_values,
+        )
+        candidate_point = Point3D(
+            x=float(row["X_m"]),
+            y=float(row["Y_m"]),
+            z=float(row["Z_m"]),
+        )
+        if candidate_point.z >= pilot_targets[1].z:
+            continue
+        try:
+            tail = pilot_wells._exact_pilot_tail_geometry(
+                start=candidate_point,
+                start_inc_deg=float(row["INC_deg"]),
+                start_azi_deg=float(row["AZI_deg"]),
+                study_points=pilot_targets[1:],
+                config=config,
+            )
+        except ValueError:
+            continue
+        if tail.first_leg_md_m < float(config.min_structural_segment_m) - 1e-9:
+            continue
+        grid_scores.append(main_md + float(tail.extra_md_m))
+    assert grid_scores
+    assert planned.total_drilled_md_m <= min(grid_scores) + 1e-6
+    for candidate_md in (300.0, 500.0, 700.0, 900.0, 1000.0):
+        candidate = plan_pilot_from_main_bore(
+            pilot_name="WELL-04_PL",
+            parent_name="WELL-04",
+            pilot_target_points=pilot_targets,
+            main_bore=main,
+            pilot_config=config,
+            main_config=config,
+            window_override=SidetrackWindowOverride(kind="md", value_m=candidate_md),
+        )
+        assert planned.total_drilled_md_m <= candidate.total_drilled_md_m + 1e-6
+    selected_by_z = plan_pilot_from_main_bore(
+        pilot_name="WELL-04_PL",
+        parent_name="WELL-04",
+        pilot_target_points=pilot_targets,
+        main_bore=main,
+        pilot_config=config,
+        main_config=config,
+        window_override=SidetrackWindowOverride(
+            kind="z", value_m=float(planned.window.point.z)
+        ),
+    )
+    assert selected_by_z.window.md_m == pytest.approx(planned.window.md_m, abs=1e-5)
+    assert float(planned.pilot.stations["X_m"].iloc[-1]) == pytest.approx(
+        pilot_targets[-1].x, abs=1e-6
+    )
+    assert float(planned.pilot.stations["Y_m"].iloc[-1]) == pytest.approx(
+        pilot_targets[-1].y, abs=1e-6
+    )
+    assert float(planned.pilot.stations["Z_m"].iloc[-1]) == pytest.approx(
+        pilot_targets[-1].z, abs=1e-6
+    )
+
+
+def test_pilot_window_refinement_keeps_each_disconnected_local_minimum() -> None:
+    candidates = (
+        (10.0, 105.0, 80.0),
+        (12.0, 100.0, 75.0),
+        (14.0, 103.0, 70.0),
+        (30.0, 99.0, 60.0),
+        (32.0, 101.0, 55.0),
+    )
+
+    assert pilot_wells._pilot_window_local_minimum_mds(
+        candidates,
+        control_step_m=2.0,
+    ) == {12.0, 30.0}
+
+
+def test_joint_pilot_tail_optimization_can_trade_first_leg_md_for_shorter_total() -> (
+    None
+):
+    pilot_config = TrajectoryConfig(
+        dls_build_max_deg_per_30m=8.0,
+        max_inc_deg=110.0,
+        min_structural_segment_m=30.0,
+    )
+    main_config = pilot_config.validated_copy(dls_build_max_deg_per_30m=30.0)
+    surface = Point3D(0.0, 0.0, 0.0)
+    window_inc_deg = 75.00669426993768
+    window_azi_deg = 342.4511630309409
+    main_stations = compute_positions_min_curv(
+        pd.DataFrame(
+            {
+                "MD_m": [0.0, 100.0, 200.0, 500.0, 800.0],
+                "INC_deg": [
+                    0.0,
+                    window_inc_deg,
+                    window_inc_deg,
+                    window_inc_deg,
+                    window_inc_deg,
+                ],
+                "AZI_deg": [window_azi_deg] * 5,
+                "segment": ["VERTICAL", "BUILD1", "HOLD", "HOLD", "HOLD"],
+            }
+        ),
+        start=surface,
+    )
+    window_row = main_stations.iloc[2]
+    window_point = Point3D(
+        float(window_row["X_m"]),
+        float(window_row["Y_m"]),
+        float(window_row["Z_m"]),
+    )
+    targets = (
+        Point3D(
+            window_point.x - 188.77751367,
+            window_point.y + 123.50831807,
+            window_point.z + 335.33908228,
+        ),
+        Point3D(
+            window_point.x - 55.19669031,
+            window_point.y - 285.14800870,
+            window_point.z + 508.49533983,
+        ),
+    )
+
+    locally_shortest = pilot_wells._exact_pilot_tail_geometry(
+        start=window_point,
+        start_inc_deg=window_inc_deg,
+        start_azi_deg=window_azi_deg,
+        study_points=targets,
+        config=pilot_config,
+    )
+    planned = plan_pilot_from_main_bore(
+        pilot_name="WELL-04_PL",
+        parent_name="WELL-04",
+        pilot_target_points=(surface, *targets),
+        main_bore=PlannerResult(
+            stations=main_stations,
+            summary={},
+            azimuth_deg=window_azi_deg,
+            md_t1_m=500.0,
+        ),
+        pilot_config=pilot_config,
+        main_config=main_config,
+        window_override=SidetrackWindowOverride(kind="md", value_m=200.0),
+    )
+
+    assert planned.pilot_tail_md_m < locally_shortest.extra_md_m - 70.0
+    assert planned.pilot.summary["pilot_tail_optimization"] == "joint_min_total_md"
+    selected_dls = tuple(
+        float(value)
+        for value in str(planned.pilot.summary["pilot_leg_dls_deg_per_30m"]).split("|")
+    )
+    assert selected_dls[0] < 8.0
+    assert selected_dls[-1] == pytest.approx(8.0)
+    assert float(planned.pilot.stations["X_m"].iloc[-1]) == pytest.approx(targets[-1].x)
+    assert float(planned.pilot.stations["Y_m"].iloc[-1]) == pytest.approx(targets[-1].y)
+    assert float(planned.pilot.stations["Z_m"].iloc[-1]) == pytest.approx(targets[-1].z)
+
+
+def test_joint_pilot_tail_optimizer_finds_narrow_feasible_dls_interval() -> None:
+    config = TrajectoryConfig(
+        dls_build_max_deg_per_30m=8.0,
+        max_inc_deg=110.0,
+        min_structural_segment_m=30.0,
+    )
+    targets = (
+        Point3D(-303.57411193452833, 427.3734121642668, 874.1279410834087),
+        Point3D(356.19494471139217, 177.120694277422, 985.8026094430365),
+    )
+
+    geometry = pilot_wells._optimized_pilot_tail_geometry(
+        start=Point3D(0.0, 0.0, 0.0),
+        start_inc_deg=11.164968644009798,
+        start_azi_deg=264.37435438048266,
+        study_points=targets,
+        config=config,
+    )
+
+    assert 1.5 < geometry.dls_deg_per_30m[0] < 1.75
+    assert geometry.dls_deg_per_30m[1] == pytest.approx(8.0)
+    assert geometry.extra_md_m > 0.0
+
+
+def test_joint_window_optimizer_handles_three_pl_points_in_one_global_search() -> None:
+    surface = Point3D(0.0, 0.0, 0.0)
+    main_stations = compute_positions_min_curv(
+        pd.DataFrame(
+            {
+                "MD_m": [0.0, 100.0, 200.0, 500.0, 800.0],
+                "INC_deg": [0.0, 30.0, 30.0, 30.0, 30.0],
+                "AZI_deg": [90.0] * 5,
+                "segment": ["VERTICAL", "BUILD1", "HOLD", "HOLD", "HOLD"],
+            }
+        ),
+        start=surface,
+    )
+    reference = main_stations.iloc[2]
+    targets = (
+        Point3D(
+            float(reference["X_m"]) + 100.0,
+            float(reference["Y_m"]),
+            float(reference["Z_m"]) + 400.0,
+        ),
+        Point3D(
+            float(reference["X_m"]) + 250.0,
+            float(reference["Y_m"]) + 50.0,
+            float(reference["Z_m"]) + 800.0,
+        ),
+        Point3D(
+            float(reference["X_m"]) + 450.0,
+            float(reference["Y_m"]),
+            float(reference["Z_m"]) + 1200.0,
+        ),
+    )
+    pilot_config = TrajectoryConfig(
+        dls_build_max_deg_per_30m=8.0,
+        max_inc_deg=110.0,
+        min_structural_segment_m=30.0,
+        md_step_control_m=5.0,
+    )
+
+    planned = plan_pilot_from_main_bore(
+        pilot_name="WELL-04_PL",
+        parent_name="WELL-04",
+        pilot_target_points=(surface, *targets),
+        main_bore=PlannerResult(
+            stations=main_stations,
+            summary={},
+            azimuth_deg=90.0,
+            md_t1_m=500.0,
+        ),
+        pilot_config=pilot_config,
+        main_config=pilot_config.validated_copy(dls_build_max_deg_per_30m=30.0),
+    )
+
+    assert float(planned.window.md_m) < 470.0
+    assert planned.pilot.summary["pilot_target_count"] == pytest.approx(3.0)
+    assert len(str(planned.pilot.summary["pilot_leg_dls_deg_per_30m"]).split("|")) == 3
+    assert planned.total_drilled_md_m == pytest.approx(800.0 + planned.pilot_tail_md_m)
+    assert float(planned.pilot.stations["X_m"].iloc[-1]) == pytest.approx(targets[-1].x)
+    assert float(planned.pilot.stations["Y_m"].iloc[-1]) == pytest.approx(targets[-1].y)
+    assert float(planned.pilot.stations["Z_m"].iloc[-1]) == pytest.approx(targets[-1].z)
+
+
+def test_pilot_from_main_bore_rejects_infeasible_manual_window() -> None:
+    config = TrajectoryConfig(
+        dls_build_max_deg_per_30m=3.0,
+        dls_horizontal_max_deg_per_30m=3.0,
+        turn_solver_max_restarts=0,
+    )
+    surface = Point3D(0.0, 0.0, 0.0)
+    main = pilot_wells.TrajectoryPlanner().plan(
+        surface=surface,
+        t1=Point3D(800.0, 0.0, 2200.0),
+        t3=Point3D(1800.0, 0.0, 2200.0),
+        config=config,
+    )
+
+    with pytest.raises(ValueError, match="не дало буримую траекторию"):
+        plan_pilot_from_main_bore(
+            pilot_name="WELL-04_PL",
+            parent_name="WELL-04",
+            pilot_target_points=(
+                surface,
+                Point3D(0.0, 0.0, 800.0),
+                Point3D(200.0, 0.0, 1300.0),
+            ),
+            main_bore=main,
+            pilot_config=config,
+            main_config=config,
+            window_override=SidetrackWindowOverride(kind="md", value_m=760.0),
+        )
+
+
+def test_main_bore_window_md_interpolation_uses_minimum_curvature() -> None:
+    survey = pd.DataFrame(
+        {
+            "MD_m": [0.0, 100.0, 200.0],
+            "INC_deg": [0.0, 30.0, 60.0],
+            "AZI_deg": [0.0, 0.0, 0.0],
+            "X_m": [0.0, 0.0, 0.0],
+            "Y_m": [0.0, 0.0, 0.0],
+            "Z_m": [0.0, 0.0, 0.0],
+            "segment": ["VERTICAL", "BUILD1", "BUILD1"],
+        }
+    )
+    survey = compute_positions_min_curv(survey, start=Point3D(0.0, 0.0, 0.0))
+    row = pilot_wells._interpolate_main_bore_window_by_md(
+        survey,
+        150.0,
+        survey["MD_m"].to_numpy(dtype=float),
+    )
+    expected = compute_positions_min_curv(
+        pd.DataFrame(
+            {
+                "MD_m": [100.0, 150.0],
+                "INC_deg": [30.0, 45.0],
+                "AZI_deg": [0.0, 0.0],
+            }
+        ),
+        start=Point3D(
+            x=float(survey.loc[1, "X_m"]),
+            y=float(survey.loc[1, "Y_m"]),
+            z=float(survey.loc[1, "Z_m"]),
+        ),
+    )
+    assert float(row["INC_deg"]) == pytest.approx(45.0)
+    assert float(row["X_m"]) == pytest.approx(float(expected["X_m"].iloc[-1]))
+    assert float(row["Y_m"]) == pytest.approx(float(expected["Y_m"].iloc[-1]))
+    assert float(row["Z_m"]) == pytest.approx(float(expected["Z_m"].iloc[-1]))
+
+
+def test_main_bore_window_z_interpolation_finds_interior_depth_crossing() -> None:
+    survey = compute_positions_min_curv(
+        pd.DataFrame(
+            {
+                "MD_m": [0.0, 200.0],
+                "INC_deg": [80.0, 100.0],
+                "AZI_deg": [0.0, 0.0],
+                "segment": ["BUILD1", "BUILD1"],
+            }
+        ),
+        start=Point3D(0.0, 0.0, 0.0),
+    )
+    md_values = survey["MD_m"].to_numpy(dtype=float)
+
+    row = pilot_wells._interpolate_main_bore_window_by_z(
+        survey,
+        5.0,
+        md_values,
+    )
+
+    assert 0.0 < float(row["MD_m"]) < 100.0
+    assert float(row["Z_m"]) == pytest.approx(5.0, abs=1e-6)
 
 
 def test_sidetrack_from_pilot_window_preserves_pose_and_first_dogleg_limit() -> None:
@@ -1279,9 +1687,7 @@ def test_reoriented_pilot_fallback_uses_standalone_geometry_seed(
     assert fallback.sidetrack_lateral_md_m == pytest.approx(320.0)
 
 
-def test_reoriented_pilot_candidates_remain_minimum_curvature_reconstructable() -> (
-    None
-):
+def test_reoriented_pilot_candidates_remain_minimum_curvature_reconstructable() -> None:
     surface = Point3D(0.0, 0.0, 0.0)
     candidates = pilot_wells._reoriented_pilot_candidates(
         target_points=(
@@ -1565,12 +1971,8 @@ def test_combine_pilot_and_sidetrack_sorts_local_sidetrack_md() -> None:
         config=TrajectoryConfig(),
     )
 
-    assert combined.stations["MD_m"].tolist() == pytest.approx(
-        [100.0, 130.0, 180.0]
-    )
-    assert combined.stations["Z_m"].tolist() == pytest.approx(
-        [100.0, 130.0, 180.0]
-    )
+    assert combined.stations["MD_m"].tolist() == pytest.approx([100.0, 130.0, 180.0])
+    assert combined.stations["Z_m"].tolist() == pytest.approx([100.0, 130.0, 180.0])
     assert np.all(np.diff(combined.stations["MD_m"].to_numpy(dtype=float)) > 0.0)
 
 

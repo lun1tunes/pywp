@@ -27,6 +27,7 @@ from pywp.coordinate_integration import (
 from pywp.coordinate_systems import CoordinateSystem
 from pywp.eclipse_welltrack import WelltrackRecord
 from pywp.mcm import dogleg_angle_rad
+from pywp.md_metrics import sidetrack_branch_md_display_label_ru
 from pywp.reference_trajectories import ImportedTrajectoryWell
 from pywp.ui_utils import dls_to_pi
 from pywp.ui_well_panels import (
@@ -1898,32 +1899,46 @@ def pilot_sidetrack_summary_df(
                     summary.get("sidetrack_window_azi_deg")
                 ),
                 "MD пилота от устья до забоя, м": pilot_total_md_m,
-                "MD бокового ствола от устья до забоя, м": sidetrack_total_md_m,
-                "Боковой ствол от окна до забоя, м": lateral_from_window_md_m,
+                (
+                    "MD ГС от устья до забоя, м"
+                    if str(summary.get("pilot_planning_mode", "")).strip()
+                    == "pilot_from_main_bore"
+                    else "MD бокового ствола от устья до забоя, м"
+                ): sidetrack_total_md_m,
+                f"{sidetrack_branch_md_display_label_ru(summary)}, м": (
+                    lateral_from_window_md_m
+                ),
                 "Суммарный метраж бурения, м": drilled_footage_m,
                 "Макс ПИ пилота, deg/10m": dls_to_pi(
                     _summary_float(pilot_summary.get("max_dls_total_deg_per_30m"))
                 ),
             }
         )
-    return pd.DataFrame(
-        rows,
-        columns=[
-            "Скважина",
-            "Пилот",
-            "Плановых точек пилота",
-            "BUILD+HOLD до точек пилота",
-            "Окно MD, м",
-            "Окно Z, м",
-            "Окно INC, deg",
-            "Окно AZI, deg",
-            "MD пилота от устья до забоя, м",
-            "MD бокового ствола от устья до забоя, м",
-            "Боковой ствол от окна до забоя, м",
-            "Суммарный метраж бурения, м",
-            "Макс ПИ пилота, deg/10m",
-        ],
-    )
+    semantic_columns = [
+        "MD бокового ствола от устья до забоя, м",
+        "Боковой ствол от окна до забоя, м",
+        "MD ГС от устья до забоя, м",
+        "ГС от окна до забоя, м",
+    ]
+    columns = [
+        "Скважина",
+        "Пилот",
+        "Плановых точек пилота",
+        "BUILD+HOLD до точек пилота",
+        "Окно MD, м",
+        "Окно Z, м",
+        "Окно INC, deg",
+        "Окно AZI, deg",
+        "MD пилота от устья до забоя, м",
+        "Суммарный метраж бурения, м",
+        "Макс ПИ пилота, deg/10m",
+    ]
+    present_semantic_columns = [
+        column for column in semantic_columns if any(column in row for row in rows)
+    ]
+    insert_at = columns.index("Суммарный метраж бурения, м")
+    columns[insert_at:insert_at] = present_semantic_columns
+    return pd.DataFrame(rows, columns=columns)
 
 
 def batch_summary_status_counts(
@@ -1962,7 +1977,7 @@ def has_md_postcheck_warning(summary_df: pd.DataFrame) -> bool:
         summary_df["Проблема"]
         .astype(str)
         .str.contains(
-            r"Превышен лимит (?:итоговой MD|MD пилота|MD бокового ствола)",
+            r"Превышен лимит (?:итоговой MD|MD пилота|MD бокового ствола|MD ГС)",
             regex=True,
         )
         .any()

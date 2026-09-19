@@ -63,6 +63,7 @@ def _default_calc_param_signature() -> tuple[object, ...]:
         float(defaults["min_hold_inc"]),
         int(defaults["turn_solver_max_restarts"]),
         str(defaults["optimization_mode"]),
+        str(defaults["pilot_planning_mode"]),
         str(defaults["turn_solver_mode"]),
         str(defaults["interpolation_method"]),
         str(defaults["j_profile_policy"]),
@@ -192,6 +193,10 @@ def test_welltrack_defaults_recover_from_legacy_keys() -> None:
     optimization_actual = _selectbox_value(at, "Оптимизация")
     assert optimization_actual is not None, "Поле оптимизации не найдено."
     assert optimization_actual == str(defaults["optimization_mode"])
+
+    pilot_planning_actual = _selectbox_value(at, "Построение пилота и ГС")
+    assert pilot_planning_actual is not None, "Поле построения пилота не найдено."
+    assert pilot_planning_actual == str(defaults["pilot_planning_mode"])
 
     turn_solver_actual = _selectbox_value(at, "Метод решателя")
     assert turn_solver_actual is not None, "Поле метода решателя не найдено."

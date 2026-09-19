@@ -722,9 +722,10 @@ def test_ptc_core_contains_bulk_horizontal_length_preprocess_controls() -> None:
 def test_ptc_core_keeps_explicit_pilot_and_zbs_name_matching_guidance() -> None:
     source = Path("pywp/ptc_core.py").read_text(encoding="utf-8")
 
-    assert "Ствол от пилота можно задать именем `well_01` или `well_01_2`." in source
-    assert "Пилот `well_01_PL` и боковой ствол нужно загружать вместе." in source
-    assert "`S` можно задать явно или не задавать" in source
+    assert "`well_01` или `well_01_2` и `well_01_PL`" in source
+    assert "Обе записи загружаются вместе." in source
+    assert "`Пилот от ГС` / `ГС от пилота`" in source
+    assert "точку `S` можно задать явно или опустить" in source
     assert "Можно также использовать имя `fact_01_2`." in source
 
 

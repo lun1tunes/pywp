@@ -51,6 +51,7 @@ def test_calc_param_defaults_match_trajectory_config(monkeypatch) -> None:
     assert defaults["kop_min_vertical"] == float(cfg.kop_min_vertical_m)
     assert defaults["min_hold_inc"] == pytest.approx(13.0)
     assert defaults["optimization_mode"] == str(cfg.optimization_mode)
+    assert defaults["pilot_planning_mode"] == str(cfg.pilot_planning_mode)
     assert defaults["turn_solver_max_restarts"] == int(cfg.turn_solver_max_restarts)
     assert defaults["turn_solver_mode"] == str(cfg.turn_solver_mode)
     assert defaults["interpolation_method"] == str(cfg.interpolation_method)
@@ -111,7 +112,7 @@ def test_apply_defaults_resyncs_when_schema_changed(monkeypatch) -> None:
         assert fake_st.session_state[f"{prefix}{suffix}"] == default
     assert (
         int(fake_st.session_state[f"{prefix}__calc_param_defaults_schema_version__"])
-        == 17
+        == 18
     )
 
 
@@ -136,7 +137,7 @@ def test_apply_defaults_resyncs_when_schema_missing(monkeypatch) -> None:
         assert fake_st.session_state[f"{prefix}{suffix}"] == default
     assert (
         int(fake_st.session_state[f"{prefix}__calc_param_defaults_schema_version__"])
-        == 17
+        == 18
     )
 
 
@@ -587,9 +588,6 @@ def test_render_calc_params_block_skips_optional_callbacks_when_disabled(
             return None
 
         def number_input(self, _label, **kwargs):
-            return None
-
-        def checkbox(self, _label, **kwargs):
             return None
 
         def selectbox(self, _label, **kwargs):

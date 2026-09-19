@@ -12,6 +12,7 @@ _SIDETRACK_TRAJECTORY_TYPES = frozenset(
         "FACT_SIDETRACK",
     }
 )
+_PILOT_FROM_MAIN_BORE_MODE = "pilot_from_main_bore"
 
 
 def _finite_summary_float(
@@ -30,6 +31,12 @@ def md_total_display_label_ru(summary: Mapping[str, object]) -> str:
     if trajectory_type in _PILOT_TRAJECTORY_TYPES:
         return "MD пилота от устья до забоя"
     if trajectory_type in _SIDETRACK_TRAJECTORY_TYPES:
+        if (
+            trajectory_type == "PILOT_SIDETRACK"
+            and str(summary.get("pilot_planning_mode", "")).strip()
+            == _PILOT_FROM_MAIN_BORE_MODE
+        ):
+            return "MD ГС от устья до забоя"
         return "MD бокового ствола от устья до забоя"
     return "Итоговая MD"
 
@@ -39,6 +46,19 @@ def parent_bore_md_display_label_ru(summary: Mapping[str, object]) -> str:
     if trajectory_type == "FACT_SIDETRACK":
         return "MD исходного ствола от устья до забоя"
     return "MD пилота от устья до забоя"
+
+
+def sidetrack_branch_md_display_label_ru(summary: Mapping[str, object]) -> str:
+    """Return the label for the calculated branch after the window."""
+
+    trajectory_type = str(summary.get("trajectory_type", "")).strip().upper()
+    if (
+        trajectory_type == "PILOT_SIDETRACK"
+        and str(summary.get("pilot_planning_mode", "")).strip()
+        == _PILOT_FROM_MAIN_BORE_MODE
+    ):
+        return "ГС от окна до забоя"
+    return "Боковой ствол от окна до забоя"
 
 
 def md_postcheck_values(
