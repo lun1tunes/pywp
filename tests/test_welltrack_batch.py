@@ -4132,7 +4132,9 @@ def test_parallel_pilot_dependency_path_passes_pilot_record_and_config_maps(
         WelltrackBatchPlanner()._evaluate_parallel_with_pilot_dependencies(
             selected_records=[pilot, parent],
             config=config,
-            config_by_name={str(pilot.name): pilot_config},
+            # The override intentionally uses a different case and the compact
+            # ``201PL``-style suffix spelling than the imported record.
+            config_by_name={"well-cpl": pilot_config},
             optimization_context_by_name=None,
             reference_wells=(),
             actual_reference_wells_by_key={},
@@ -4156,6 +4158,40 @@ def test_parallel_pilot_dependency_path_passes_pilot_record_and_config_maps(
         "WELL-C_PL",
         "WELL-C",
     }
+
+
+def test_per_well_pilot_mode_lookup_uses_canonical_name() -> None:
+    pilot = WelltrackRecord(
+        name="WELL-04_PL",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=80.0, y=0.0, z=800.0, md=800.0),
+        ),
+    )
+    parent = WelltrackRecord(
+        name="WELL-04",
+        points=(
+            WelltrackPoint(x=0.0, y=0.0, z=0.0, md=0.0),
+            WelltrackPoint(x=100.0, y=0.0, z=1200.0, md=1200.0),
+            WelltrackPoint(x=500.0, y=0.0, z=1200.0, md=1600.0),
+        ),
+    )
+    base_config = _fast_batch_config(
+        pilot_planning_mode=PILOT_PLANNING_MAIN_BORE_FROM_PILOT,
+    )
+    main_first_config = base_config.validated_copy(
+        pilot_planning_mode=PILOT_PLANNING_PILOT_FROM_MAIN_BORE,
+    )
+
+    ordered = WelltrackBatchPlanner._selected_records_in_order(
+        records=[pilot, parent],
+        selected_names={"well-04"},
+        selected_order=["well-04"],
+        base_config=base_config,
+        config_by_name={"well-04": main_first_config},
+    )
+
+    assert [str(record.name) for record in ordered] == ["WELL-04", "WELL-04_PL"]
 
 
 def test_batch_planner_parallelizes_independent_main_first_dependency_groups(

@@ -50,7 +50,14 @@ ALT_BRANCH_SUFFIX = well_name_utils.ALT_BRANCH_SUFFIX
 SIDETRACK_WINDOW_ABOVE_FIRST_TARGET_MIN_M = 50.0
 SIDETRACK_WINDOW_ABOVE_FIRST_TARGET_MAX_M = 100.0
 _MAX_PILOT_WINDOW_COARSE_CANDIDATES = 240
-_PILOT_NUMERICAL_DLS_FLOOR_DEG_PER_30M = 0.1
+# Keep the optimizer away from an exactly zero-curvature BUILD parameter while
+# preserving valid engineering limits below 0.1 deg/30 m.
+_PILOT_NUMERICAL_DLS_FLOOR_DEG_PER_30M = 1.0e-6
+# ``mcm.ratio_factor`` rejects doglegs within this angle of 180 degrees.  The
+# exact BUILD+HOLD solver must apply the same boundary before materialization;
+# otherwise it can rank a mathematically valid but numerically unreconstructable
+# candidate and defer the failure to a later DataFrame-building step.
+_PILOT_MCM_DOGLEG_SINGULARITY_TOL_RAD = 1.0e-3
 _SURFACE_POINT_LABELS = {
     "s",
     "s1",
@@ -253,6 +260,37 @@ def plan_pilot_from_main_bore(
         float(np.linalg.norm(_point_array(right) - _point_array(left)))
         for left, right in zip(pilot_target_points[1:-1], pilot_target_points[2:])
     )
+    window_candidates_by_md: dict[float, tuple[float, PilotWindow, float]] = {}
+    window_candidate_errors_by_md: dict[float, str] = {}
+
+    def window_candidate(md: float) -> tuple[float, PilotWindow, float]:
+        md = float(md)
+        md_key = round(md, 6)
+        cached = window_candidates_by_md.get(md_key)
+        if cached is not None:
+            return cached
+        cached_error = window_candidate_errors_by_md.get(md_key)
+        if cached_error is not None:
+            raise ValueError(cached_error)
+        try:
+            row = _interpolate_main_bore_window_by_md(stations, md, md_values)
+            window = PilotWindow.from_station(
+                pilot_name=pilot_name,
+                parent_name=parent_name,
+                row=row,
+            )
+            if float(window.point.z) >= float(pilot_target_points[1].z) - SMALL:
+                raise ValueError("Окно находится не выше первой PL-точки.")
+            lower_bound = (
+                float(np.linalg.norm(_point_array(window.point) - pl1_xyz))
+                + fixed_tail_lower_bound
+            )
+        except (ValueError, ArithmeticError) as exc:
+            window_candidate_errors_by_md[md_key] = str(exc)
+            raise
+        candidate = (md, window, lower_bound)
+        window_candidates_by_md[md_key] = candidate
+        return candidate
 
     if window_override is not None:
         if window_override.kind == "md":
@@ -294,8 +332,8 @@ def plan_pilot_from_main_bore(
             else min_md
         )
         # Find a good feasible upper bound quickly around survey stations and
-        # the geometric nearest point.  A second exhaustive control grid below
-        # then proves the best window at the configured MD resolution.
+        # the geometric nearest point.  The control grid below samples every
+        # window at the configured MD resolution.
         survey_candidates = (
             eligible_md
             if len(eligible_md) <= _MAX_PILOT_WINDOW_COARSE_CANDIDATES
@@ -323,13 +361,9 @@ def plan_pilot_from_main_bore(
 
         def proximity_lower_bound(md: float) -> float:
             try:
-                row = _interpolate_main_bore_window_by_md(stations, md, md_values)
+                return float(window_candidate(md)[2])
             except (ValueError, ArithmeticError):
                 return float("inf")
-            if float(row["Z_m"]) >= float(pilot_target_points[1].z) - SMALL:
-                return float("inf")
-            xyz = np.asarray([row["X_m"], row["Y_m"], row["Z_m"]], dtype=float)
-            return float(np.linalg.norm(xyz - pl1_xyz)) + fixed_tail_lower_bound
 
         # A close window establishes a strong feasible upper bound early;
         # distant candidates can then be rejected by their geometric bound.
@@ -339,7 +373,6 @@ def plan_pilot_from_main_bore(
     evaluated: set[float] = set()
     raw_scores_by_md: dict[float, tuple[float, float, float]] = {}
     scored_candidates_by_md: dict[float, tuple[float, float, float]] = {}
-    window_candidates_by_md: dict[float, tuple[float, PilotWindow, float]] = {}
     last_problem = ""
     main_md = float(md_values[-1])
 
@@ -351,19 +384,9 @@ def plan_pilot_from_main_bore(
             return
         evaluated.add(md_key)
         try:
-            row = _interpolate_main_bore_window_by_md(stations, md, md_values)
-            window = PilotWindow.from_station(
-                pilot_name=pilot_name, parent_name=parent_name, row=row
-            )
-            if float(window.point.z) >= float(pilot_target_points[1].z) - SMALL:
-                raise ValueError("Окно находится не выше первой PL-точки.")
+            _candidate_md, window, lower_bound = window_candidate(md)
             # The main bore is already fixed: only the additional pilot tail
             # varies with the window, so this is a strict lower bound on cost.
-            lower_bound = (
-                float(np.linalg.norm(_point_array(window.point) - pl1_xyz))
-                + fixed_tail_lower_bound
-            )
-            window_candidates_by_md[md_key] = (md, window, lower_bound)
             if best is not None and lower_bound > best[0][0] - main_md + 1e-6:
                 return
             tail_geometry = _exact_pilot_tail_geometry(
@@ -426,20 +449,7 @@ def plan_pilot_from_main_bore(
         candidate = window_candidates_by_md.get(md_key)
         if candidate is None:
             try:
-                row = _interpolate_main_bore_window_by_md(stations, md, md_values)
-                window = PilotWindow.from_station(
-                    pilot_name=pilot_name,
-                    parent_name=parent_name,
-                    row=row,
-                )
-                if float(window.point.z) >= float(pilot_target_points[1].z) - SMALL:
-                    raise ValueError("Окно находится не выше первой PL-точки.")
-                lower_bound = (
-                    float(np.linalg.norm(_point_array(window.point) - pl1_xyz))
-                    + fixed_tail_lower_bound
-                )
-                candidate = (md, window, lower_bound)
-                window_candidates_by_md[md_key] = candidate
+                candidate = window_candidate(md)
             except (ValueError, PlanningError, ArithmeticError) as exc:
                 last_problem = str(exc)
                 return
@@ -508,7 +518,7 @@ def plan_pilot_from_main_bore(
         for md in control_grid:
             evaluate(md)
 
-        # The control grid guarantees the configured engineering resolution.
+        # The control grid samples the configured engineering resolution.
         # Refine every feasible local minimum, including minima at the edge of
         # a disconnected feasibility interval.  Refining only the winning grid
         # cell can miss a lower minimum between nodes when multiple PL points
@@ -1044,6 +1054,8 @@ def _optimized_pilot_window_tail_geometry(
 
     def objective(unit_values: np.ndarray) -> float:
         candidate = candidate_for(unit_values)
+        # ``extra_md_m`` is already measured from the window.  Total drilled
+        # footage adds only the constant MD of the complete main bore.
         return float(candidate.tail.extra_md_m) if candidate is not None else 1.0e12
 
     population_size = max(20, min(64, 6 * dimension))
@@ -3369,7 +3381,10 @@ def _exact_build_hold_geometry(
     for root in (base, math.pi - base):
         for turns in (-1, 0, 1):
             angle_rad = root - phase + 2.0 * math.pi * turns
-            if angle_rad <= 1e-9 or angle_rad >= math.pi - 1e-9:
+            if (
+                angle_rad <= 1e-9
+                or angle_rad >= math.pi - _PILOT_MCM_DOGLEG_SINGULARITY_TOL_RAD
+            ):
                 continue
             sin_angle = math.sin(angle_rad)
             cos_angle = math.cos(angle_rad)
@@ -4068,6 +4083,11 @@ def _max_dls_limit_excess(
             limit = float(
                 limits.get("HORIZONTAL", config.dls_horizontal_max_deg_per_30m)
             )
+        elif segment.startswith("PILOT_BUILD"):
+            # BUILD2 is a section of the classical S-profile.  Numbered pilot
+            # legs are independent BUILD+HOLD connections between PL points
+            # and all use the pilot BUILD limit, as the pilot solver does.
+            limit = float(config.dls_build_max_deg_per_30m)
         elif "BUILD_2" in segment or "BUILD2" in segment:
             limit = float(limits.get("BUILD2", config.dls_build_max_deg_per_30m))
         else:

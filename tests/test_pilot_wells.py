@@ -494,6 +494,132 @@ def test_joint_pilot_tail_optimizer_finds_narrow_feasible_dls_interval() -> None
     assert geometry.extra_md_m > 0.0
 
 
+def test_joint_pilot_tail_optimizer_honors_dls_limits_below_point_one(
+    monkeypatch,
+) -> None:
+    observed_dls: list[tuple[float, ...]] = []
+
+    def fake_exact_tail_geometry(*, dls_values_deg_per_30m, **_kwargs):
+        values = tuple(float(value) for value in dls_values_deg_per_30m)
+        observed_dls.append(values)
+        return pilot_wells._PilotTailGeometry(
+            extra_md_m=float(sum(values)),
+            first_leg_md_m=100.0,
+            dls_deg_per_30m=values,
+        )
+
+    monkeypatch.setattr(
+        pilot_wells,
+        "_exact_pilot_tail_geometry",
+        fake_exact_tail_geometry,
+    )
+    config = TrajectoryConfig(
+        dls_build_min_deg_per_30m=0.02,
+        dls_build_max_deg_per_30m=0.2,
+        max_inc_deg=110.0,
+        min_structural_segment_m=30.0,
+    )
+
+    geometry = pilot_wells._optimized_pilot_tail_geometry(
+        start=Point3D(0.0, 0.0, 0.0),
+        start_inc_deg=0.0,
+        start_azi_deg=0.0,
+        study_points=(Point3D(0.0, 0.0, 100.0), Point3D(0.0, 0.0, 200.0)),
+        config=config,
+    )
+
+    assert observed_dls
+    assert any(values[0] < 0.1 for values in observed_dls)
+    assert config.dls_build_min_deg_per_30m <= geometry.dls_deg_per_30m[0] < 0.1
+    assert geometry.dls_deg_per_30m[-1] == pytest.approx(
+        config.dls_build_max_deg_per_30m
+    )
+
+
+def test_exact_pilot_geometry_rejects_mcm_singular_dogleg() -> None:
+    target_vector = np.asarray(
+        [131.44400146, -195.49457057, 525.83784028],
+        dtype=float,
+    )
+
+    geometry = pilot_wells._exact_build_hold_geometry(
+        target_vector=target_vector,
+        start_inc_deg=103.29697547505805,
+        start_azi_deg=264.17956396210695,
+        dls_deg_per_30m=6.502631882288366,
+        max_inc_deg=120.0,
+    )
+
+    assert geometry is None
+
+
+def test_pilot_dls_check_does_not_apply_classical_build2_limit() -> None:
+    stations = pd.DataFrame(
+        {
+            "DLS_deg_per_30m": [6.0, 6.0, 1.5],
+            "segment": ["PILOT_BUILD_1", "PILOT_BUILD_2", "PILOT_HOLD_2"],
+        }
+    )
+    config = TrajectoryConfig(
+        dls_build_max_deg_per_30m=6.0,
+        dls_build2_max_deg_per_30m=2.0,
+    )
+
+    assert pilot_wells._max_dls_limit_excess(stations, config) == pytest.approx(0.0)
+
+
+def test_joint_window_optimizer_counts_tail_from_window_only(monkeypatch) -> None:
+    stations = pd.DataFrame(
+        {
+            "MD_m": [0.0, 1000.0],
+            "INC_deg": [90.0, 90.0],
+            "AZI_deg": [90.0, 90.0],
+            "X_m": [0.0, 1000.0],
+            "Y_m": [0.0, 0.0],
+            "Z_m": [0.0, 0.0],
+        }
+    )
+
+    def fake_tail_geometry(*, start, **_kwargs):
+        # The tail is already measured from the window; subtracting window MD
+        # again would incorrectly prefer a longer tail at the deeper window.
+        window_md = float(start.x)
+        return pilot_wells._PilotTailGeometry(
+            extra_md_m=1000.0 + 0.2 * window_md,
+            first_leg_md_m=100.0,
+            dls_deg_per_30m=(2.0, 2.0),
+        )
+
+    monkeypatch.setattr(
+        pilot_wells,
+        "_exact_pilot_tail_geometry",
+        fake_tail_geometry,
+    )
+    config = TrajectoryConfig(
+        md_step_control_m=100.0,
+        md_step_m=100.0,
+        dls_build_max_deg_per_30m=2.0,
+        min_structural_segment_m=100.0,
+    )
+
+    candidate = pilot_wells._optimized_pilot_window_tail_geometry(
+        main_stations=stations,
+        md_values=stations["MD_m"].to_numpy(dtype=float),
+        pilot_name="WELL-04_PL",
+        parent_name="WELL-04",
+        min_window_md_m=100.0,
+        max_window_md_m=900.0,
+        study_points=(Point3D(0.0, 0.0, 1000.0), Point3D(0.0, 0.0, 2000.0)),
+        config=config,
+        seed_window_mds=(100.0, 900.0),
+    )
+
+    assert float(candidate.window.md_m) == pytest.approx(100.0, abs=1.0)
+    assert 1000.0 + candidate.tail.extra_md_m == pytest.approx(
+        2000.0 + 0.2 * float(candidate.window.md_m)
+    )
+
+
 def test_joint_window_optimizer_handles_three_pl_points_in_one_global_search() -> None:
     surface = Point3D(0.0, 0.0, 0.0)
     main_stations = compute_positions_min_curv(

@@ -169,6 +169,40 @@ _TARGET_MISS_WARNING_ABS_M = 5.0
 _TARGET_MISS_WARNING_TOLERANCE_FRACTION = 0.5
 
 
+def _well_mapping_value(
+    mapping: Mapping[str, Any] | None,
+    name: object,
+    default: Any = None,
+) -> Any:
+    """Resolve a per-well value by exact or canonical well name.
+
+    Imported well names may differ only by case or by the optional underscore
+    in ``_PL``/``_ZBS`` suffixes.  Dependency matching already uses
+    ``well_name_key``; configuration and runtime context lookups must use the
+    same identity or a valid override can silently be ignored.
+    """
+
+    if not mapping:
+        return default
+    text = str(name)
+    if text in mapping:
+        return mapping[text]
+    key = well_name_key(text)
+    for candidate_name, value in mapping.items():
+        if well_name_key(candidate_name) == key:
+            return value
+    return default
+
+
+def _well_config_value(
+    config_by_name: Mapping[str, TrajectoryConfig] | None,
+    name: object,
+    default: TrajectoryConfig,
+) -> TrajectoryConfig:
+    value = _well_mapping_value(config_by_name, name)
+    return value if isinstance(value, TrajectoryConfig) else default
+
+
 def _fast_proxy_reference_uncertainty_models(
     models_by_name: Mapping[str, PlanningUncertaintyModel] | None,
 ) -> dict[str, PlanningUncertaintyModel] | None:
@@ -576,7 +610,11 @@ def _ambiguous_main_first_pilot_parents(
         if is_pilot_record(record) or is_zbs_record(record):
             continue
         pilot_key = pilot_name_key_for_record(record)
-        record_config = (config_by_name or {}).get(str(record.name), base_config)
+        record_config = _well_config_value(
+            config_by_name,
+            record.name,
+            base_config,
+        )
         if (
             pilot_key not in record_keys
             or str(record_config.pilot_planning_mode)
@@ -1549,8 +1587,10 @@ class WelltrackBatchPlanner:
                             if is_pilot_record(item)
                         },
                         pilot_configs_by_key={
-                            well_name_key(item.name): (config_by_name or {}).get(
-                                str(item.name), config
+                            well_name_key(item.name): _well_config_value(
+                                config_by_name,
+                                item.name,
+                                config,
                             )
                             for item in selected_records_by_name.values()
                             if is_pilot_record(item)
@@ -1685,8 +1725,11 @@ class WelltrackBatchPlanner:
         pool = ProcessPoolExecutor(max_workers=workers, mp_context=_mp_ctx)
         try:
             for record in selected_records:
-                well_config = (config_by_name or {}).get(str(record.name)) or config
-                opt_ctx = (optimization_context_by_name or {}).get(str(record.name))
+                well_config = _well_config_value(config_by_name, record.name, config)
+                opt_ctx = _well_mapping_value(
+                    optimization_context_by_name,
+                    record.name,
+                )
                 sidetrack_override = sidetrack_window_overrides_by_key.get(
                     well_name_key(record.name)
                 )
@@ -1800,8 +1843,10 @@ class WelltrackBatchPlanner:
             if is_pilot_record(record)
         }
         pilot_configs_by_key = {
-            well_name_key(record.name): (config_by_name or {}).get(
-                str(record.name), config
+            well_name_key(record.name): _well_config_value(
+                config_by_name,
+                record.name,
+                config,
             )
             for record in selected_records
             if is_pilot_record(record)
@@ -1848,8 +1893,11 @@ class WelltrackBatchPlanner:
                 index = len(executed_well_names) + 1
                 if progress_callback is not None:
                     progress_callback(index, total, record.name)
-                well_config = (config_by_name or {}).get(str(record.name)) or config
-                opt_ctx = (optimization_context_by_name or {}).get(str(record.name))
+                well_config = _well_config_value(config_by_name, record.name, config)
+                opt_ctx = _well_mapping_value(
+                    optimization_context_by_name,
+                    record.name,
+                )
                 sidetrack_override = sidetrack_window_overrides_by_key.get(
                     well_name_key(record.name)
                 )
@@ -1902,8 +1950,11 @@ class WelltrackBatchPlanner:
 
                 planner_progress_callback = _planner_progress
 
-            well_config = (config_by_name or {}).get(str(record.name)) or config
-            opt_ctx = (optimization_context_by_name or {}).get(str(record.name))
+            well_config = _well_config_value(config_by_name, record.name, config)
+            opt_ctx = _well_mapping_value(
+                optimization_context_by_name,
+                record.name,
+            )
             sidetrack_override = sidetrack_window_overrides_by_key.get(
                 well_name_key(record.name)
             )
@@ -1996,16 +2047,18 @@ class WelltrackBatchPlanner:
         future_to_group: dict[Future, list[WelltrackRecord]] = {}
         try:
             for group in dependency_groups:
-                group_names = {str(record.name) for record in group}
+                group_name_keys = {
+                    well_name_key(record.name) for record in group
+                }
                 group_config_payload = {
                     name: item.model_dump()
                     for name, item in (config_by_name or {}).items()
-                    if name in group_names
+                    if well_name_key(name) in group_name_keys
                 }
                 group_context_payload = {
                     name: payload
                     for name, context in (optimization_context_by_name or {}).items()
-                    if name in group_names
+                    if well_name_key(name) in group_name_keys
                     and (payload := _optimization_context_to_worker_payload(context))
                     is not None
                 }
@@ -2405,8 +2458,10 @@ class WelltrackBatchPlanner:
                 return TrajectoryConfig(
                     pilot_planning_mode=PILOT_PLANNING_MAIN_BORE_FROM_PILOT
                 )
-            return (config_by_name or {}).get(
-                str(record.name), base_config or TrajectoryConfig()
+            return _well_config_value(
+                config_by_name,
+                record.name,
+                base_config or TrajectoryConfig(),
             )
 
         def append_with_pilot(record: WelltrackRecord) -> None:
@@ -2518,7 +2573,11 @@ class WelltrackBatchPlanner:
             pilot_index = index_by_key.get(pilot_name_key_for_record(record))
             if pilot_index is None:
                 continue
-            record_config = (config_by_name or {}).get(str(record.name), base_config)
+            record_config = _well_config_value(
+                config_by_name,
+                record.name,
+                base_config,
+            )
             if (
                 str(record_config.pilot_planning_mode)
                 == PILOT_PLANNING_PILOT_FROM_MAIN_BORE
@@ -2614,9 +2673,11 @@ class WelltrackBatchPlanner:
             and not is_zbs_record(record)
             and pilot_name_key_for_record(record) in names
             and str(
-                (config_by_name or {})
-                .get(str(record.name), base_config)
-                .pilot_planning_mode
+                _well_config_value(
+                    config_by_name,
+                    record.name,
+                    base_config,
+                ).pilot_planning_mode
             )
             == PILOT_PLANNING_PILOT_FROM_MAIN_BORE
             for record in ordered
@@ -2641,9 +2702,11 @@ class WelltrackBatchPlanner:
                 and not is_zbs_record(candidate)
                 and pilot_name_key_for_record(candidate) == pilot_key
                 and str(
-                    (config_by_name or {})
-                    .get(str(candidate.name), base_config)
-                    .pilot_planning_mode
+                    _well_config_value(
+                        config_by_name,
+                        candidate.name,
+                        base_config,
+                    ).pilot_planning_mode
                 )
                 == PILOT_PLANNING_PILOT_FROM_MAIN_BORE
             ),
@@ -2687,9 +2750,16 @@ class WelltrackBatchPlanner:
                 parent_name = str(main_first_parent.name)
                 return main_first_parent, {
                     "well_name": parent_name,
-                    "config": (config_by_name or {}).get(parent_name, base_config),
+                    "config": _well_config_value(
+                        config_by_name,
+                        parent_name,
+                        base_config,
+                    ),
                     "optimization_context": self._resolve_optimization_context(
-                        context=(optimization_context_by_name or {}).get(parent_name),
+                        context=_well_mapping_value(
+                            optimization_context_by_name,
+                            parent_name,
+                        ),
                         recalculated_success_by_name=recalculated_success_by_name,
                     ),
                 }
@@ -2706,8 +2776,10 @@ class WelltrackBatchPlanner:
                 ),
                 "",
             )
-            record_config = (config_by_name or {}).get(
-                str(record_for_override.name), base_config
+            record_config = _well_config_value(
+                config_by_name,
+                record_for_override.name,
+                base_config,
             )
             if (
                 pilot_name
@@ -2719,9 +2791,16 @@ class WelltrackBatchPlanner:
                 pilot_record = selected_records_by_name[pilot_name]
                 return pilot_record, {
                     "well_name": pilot_name,
-                    "config": (config_by_name or {}).get(pilot_name, base_config),
+                    "config": _well_config_value(
+                        config_by_name,
+                        pilot_name,
+                        base_config,
+                    ),
                     "optimization_context": self._resolve_optimization_context(
-                        context=(optimization_context_by_name or {}).get(pilot_name),
+                        context=_well_mapping_value(
+                            optimization_context_by_name,
+                            pilot_name,
+                        ),
                         recalculated_success_by_name=recalculated_success_by_name,
                     ),
                 }
@@ -2766,19 +2845,24 @@ class WelltrackBatchPlanner:
             and well_name_key(pilot_name)
             not in {well_name_key(name) for name in recalculated_success_by_name}
             and str(
-                (config_by_name or {})
-                .get(str(next_record.name), base_config)
-                .pilot_planning_mode
+                _well_config_value(
+                    config_by_name,
+                    next_record.name,
+                    base_config,
+                ).pilot_planning_mode
             )
             == PILOT_PLANNING_MAIN_BORE_FROM_PILOT
         ):
             next_name = pilot_name
         record = selected_records_by_name[next_name]
         context = self._resolve_optimization_context(
-            context=(optimization_context_by_name or {}).get(str(record.name)),
+            context=_well_mapping_value(
+                optimization_context_by_name,
+                record.name,
+            ),
             recalculated_success_by_name=recalculated_success_by_name,
         )
-        config = (config_by_name or {}).get(str(record.name), base_config)
+        config = _well_config_value(config_by_name, record.name, base_config)
         return record, {
             "well_name": str(record.name),
             "config": config,
@@ -2873,7 +2957,7 @@ class WelltrackBatchPlanner:
         config = (
             base_config.validated_copy(**update_fields)
             if update_fields
-            else (config_by_name or {}).get(well_name, base_config)
+            else _well_config_value(config_by_name, well_name, base_config)
         )
         context = payload.get("optimization_context")
         if isinstance(context, AntiCollisionOptimizationContext):
@@ -2883,7 +2967,10 @@ class WelltrackBatchPlanner:
             )
         elif context is None:
             context = self._resolve_optimization_context(
-                context=(optimization_context_by_name or {}).get(well_name),
+                context=_well_mapping_value(
+                    optimization_context_by_name,
+                    well_name,
+                ),
                 recalculated_success_by_name=recalculated_success_by_name,
             )
         return {
